@@ -1,0 +1,44 @@
+# Local development notes and preset history (including nested folders).
+dev-notes/
+devnotes/
+devnote/
+presets/
+AGENTS.md
+.agents/
+.codex/
+docs/design/
+docs/implementation/
+docs/reference/
+docs/project-layout.md
+
+# Dependencies, generated packages, previews and temporary files.
+node_modules/
+dist/
+.tmp/
+tmp/
+coverage/
+*.log
+*.tmp
+*.bak
+*.zip
+*.sha256
+
+# Local credentials and machine-specific configuration.
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Editor and operating-system files.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,42 @@
+/* All colors inherit the active SillyTavern theme. The drawer never makes the host inert. */
+.bbp-entry,.bbp-dialog,.bbp-ball { --bbp-text:var(--SmartThemeBodyColor,#e5e5e5); --bbp-bg:var(--SmartThemeBlurTintColor,#262626); --bbp-border:var(--SmartThemeBorderColor,#666); --bbp-accent:var(--SmartThemeQuoteColor,#aaa); color:var(--bbp-text); box-sizing:border-box; font-family:inherit; }
+.bbp-entry { padding:.6rem; border:1px solid var(--bbp-border); border-radius:.5rem; margin:.5rem 0; }
+.bbp-entry summary { cursor:pointer; padding:.35rem; font-weight:600; }
+.bbp-entry .bbp-field { margin:.7rem 0; }
+.bbp-dialog { position:fixed; inset:3.5rem .6rem max(var(--bbp-input-height,8rem),env(safe-area-inset-bottom)) auto; z-index:2999; display:flex; flex-direction:column; width:min(28rem,calc(100vw - 1.2rem)); max-height:calc(100dvh - 4rem - var(--bbp-input-height,8rem)); min-height:0; padding:0; margin:0; background:var(--bbp-bg); backdrop-filter:blur(var(--blurStrength,14px)); border:1px solid var(--bbp-border); border-radius:.65rem; box-shadow:0 .5rem 2rem var(--SmartThemeShadowColor,#0006); }
+.bbp-dialog[hidden] { display:none!important; }
+.bbp-dialog header { display:flex; align-items:center; gap:.5rem; padding:.6rem .8rem; border-bottom:1px solid var(--bbp-border); flex-shrink:0; }
+.bbp-dialog header strong { font-size:1.1em; }
+.bbp-dialog header span { flex:1; font-size:.75em; opacity:.8; }
+.bbp-status { font-size:.75em; padding:.55rem .8rem; overflow-wrap:anywhere; border-bottom:1px solid var(--bbp-border); max-height:6rem; overflow:auto; flex-shrink:0; }
+.bbp-message { padding:.3rem .8rem; font-size:.86em; color:var(--bbp-accent); white-space:pre-wrap; max-height:5rem; overflow:auto; flex-shrink:0; }
+.bbp-message:empty { display:none; }
+.bbp-dialog nav { display:flex; gap:.2rem; padding:.4rem; overflow:auto; flex-shrink:0; }
+.bbp-dialog button,.bbp-entry button { display:inline-flex; justify-content:center; align-items:center; width:auto; font:inherit; color:inherit; background:var(--SmartThemeBlurTintColor,transparent); border:1px solid var(--bbp-border); border-radius:.4rem; padding:.45rem .65rem; min-height:2.5rem; cursor:pointer; margin:.2rem; }
+.bbp-dialog button:hover,.bbp-entry button:hover { border-color:var(--bbp-accent); background:color-mix(in srgb,var(--bbp-accent) 12%,transparent); }
+.bbp-dialog button:disabled { opacity:.5; cursor:wait; }
+.bbp-dialog nav button { white-space:nowrap; font-size:.85em; }
+.bbp-dialog nav [aria-current=true] { border-color:var(--bbp-accent); background:color-mix(in srgb,var(--bbp-accent) 16%,transparent); }
+.bbp-dialog main { overflow:auto; flex:1; min-height:0; padding:.25rem .9rem 1rem; overscroll-behavior:contain; }
+.bbp-dialog h2 { font-size:1.15em; margin:1rem 0 .6rem; }
+.bbp-dialog h3 { font-size:1.05em; margin:.5rem 0; }
+.bbp-dialog p { line-height:1.65; overflow-wrap:anywhere; }
+.bbp-field { display:flex; flex-direction:column; gap:.35rem; margin:.9rem 0; font-size:.92em; }
+.bbp-field:has(input[type=checkbox]) { flex-direction:row-reverse; justify-content:flex-end; align-items:center; }
+.bbp-dialog input:not([type=checkbox]),.bbp-dialog textarea,.bbp-dialog select { box-sizing:border-box; width:100%; min-width:0; color:var(--bbp-text); background:var(--SmartThemeChatTintColor,var(--bbp-bg)); border:1px solid var(--bbp-border); border-radius:.4rem; padding:.5rem; font:inherit; }
+.bbp-dialog select option { background:var(--SmartThemeChatTintColor,var(--bbp-bg)); color:var(--bbp-text); }
+.bbp-dialog textarea { resize:vertical; min-height:5rem; line-height:1.6; }
+.bbp-dialog input[type=checkbox],.bbp-entry input[type=checkbox] { width:1.2rem; height:1.2rem; flex-shrink:0; accent-color:var(--bbp-accent); }
+.bbp-dialog :focus-visible,.bbp-entry :focus-visible,.bbp-ball:focus-visible { outline:2px solid var(--bbp-accent); outline-offset:2px; }
+.bbp-card { border:1px solid var(--bbp-border); border-radius:.5rem; padding:.75rem; margin:1rem 0; }
+.bbp-hint { font-size:.84em; opacity:.8; }
+.bbp-prose,.bbp-dialog blockquote,.bbp-dialog pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.bbp-dialog pre { font:inherit; font-size:.87em; padding:.6rem; background:color-mix(in srgb,var(--bbp-accent) 7%,transparent); }
+.bbp-dialog blockquote { margin:.6rem 0; padding-left:.75rem; border-left:3px solid var(--bbp-accent); max-height:14rem; overflow:auto; }
+.bbp-dialog details { border-top:1px solid var(--bbp-border); padding:.75rem 0; }
+.bbp-dialog summary { cursor:pointer; }
+.bbp-actions { display:flex; flex-wrap:wrap; }
+.bbp-ball { position:fixed; right:.75rem; top:40%; z-index:2998; width:2.8rem; height:2.8rem; border-radius:50%; border:1px solid var(--bbp-border); background:var(--bbp-bg); backdrop-filter:blur(var(--blurStrength,14px)); box-shadow:0 .2rem .6rem var(--SmartThemeShadowColor,#0006); font-size:1.35rem; cursor:pointer; touch-action:none; }
+.bbp-ball[data-busy=true] { border:3px dotted var(--bbp-accent); }
+.bbp-ball[data-error=true]::after { content:'!'; position:absolute; right:-.15rem; top:-.15rem; width:1rem; height:1rem; font:bold .75rem/1rem sans-serif; border-radius:50%; color:var(--bbp-bg); background:var(--bbp-text); }
+@media(max-width:600px) { .bbp-dialog { top:3rem; right:.35rem; width:calc(100vw - .7rem); max-height:calc(100dvh - 3.5rem - var(--bbp-input-height,8rem)); } .bbp-dialog main { padding:.2rem .7rem 1rem; } .bbp-dialog header { padding:.4rem .6rem; } .bbp-dialog header span { display:none; } .bbp-dialog header strong { flex:1; } .bbp-status { padding:.4rem .6rem; max-height:4.8rem; } .bbp-dialog input,.bbp-dialog textarea,.bbp-dialog select { font-size:16px!important; } }

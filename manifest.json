@@ -1,0 +1,11 @@
+{
+  "display_name": "BBPresets",
+  "loading_order": 55,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "BBPresets",
+  "version": "0.3.0",
+  "generate_interceptor": "bbPresetsInterceptor"
+}

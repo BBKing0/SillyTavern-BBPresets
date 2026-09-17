@@ -1,0 +1,33 @@
+import {TavernHost} from './runtime/host.js';
+import {BBPresetsApp} from './runtime/app.js';
+import {Workbench} from './ui/workbench.js';
+
+// Host-owned extension loader invokes this registered interceptor before its model request.
+let app,workbench,destroyed=false,starting;
+globalThis.bbPresetsInterceptor=async(_chat,_contextSize,_abort,type)=>{
+    if(!app||destroyed)return;
+    try{await app.beforeGenerate(type);}catch(e){app.host.inject('');app.report(e);}
+};
+export async function start(){
+    if(starting)return starting;
+    starting=(async()=>{
+        if(destroyed)return;
+        const host=new TavernHost();
+        app=new BBPresetsApp(host,{notify:(message,kind)=>globalThis.toastr?.[kind]?.(message,'BBPresets',{escapeHtml:true})});
+        workbench=new Workbench(app);
+        try{await app.init();}catch(e){app.report(e);}
+        document.addEventListener('visibilitychange',visibility);
+        globalThis.addEventListener('pageshow',resume);
+        globalThis.addEventListener('pagehide',pause);
+        globalThis.addEventListener('beforeunload',leaving);
+    })();return starting;
+}
+function pause(){app?.suspend();}
+async function resume(){if(!app?.repo||destroyed||document.hidden)return;try{await app.refresh();await app.drain();}catch(e){app.report(e);}}
+function visibility(){if(document.hidden)pause();else void resume();}
+function leaving(event){if(app?.status==='saving'||app?.running){event.preventDefault();event.returnValue='';}}
+export function destroy(){destroyed=true;workbench?.destroy();app?.destroy();document.removeEventListener('visibilitychange',visibility);globalThis.removeEventListener('pageshow',resume);globalThis.removeEventListener('pagehide',pause);globalThis.removeEventListener('beforeunload',leaving);delete globalThis.bbPresetsInterceptor;}
+// Extensions load after the host bootstrap; a small readiness retry also supports slower devices.
+let tries=0;
+function ready(){if(destroyed)return;if(!document.body||!globalThis.SillyTavern?.getContext){if(++tries<60)setTimeout(ready,500);else console.error('[BBPresets] 酒馆上下文未就绪，请刷新页面');return;}void start();}
+ready();
