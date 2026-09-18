@@ -1,10 +1,13 @@
 import {assert,copy,same,uid,hash,newDocument,applyChanges,invalidateSources,forkAt,restoreDocument,validateDocument,validateSettings,record} from '../core/model.js';
 import {Repository} from '../core/repository.js';
 import {injection,maintenancePrompt,maintenanceMaterial,parseChanges,INITIALIZATION_TEMPLATE,parseQuestions} from './prompts.js';
+import {newDraft,questionSet,draftAnswers,validateDraft} from '../core/initialization.js';
+import {retryRequest,transient} from './network.js';
 
 export class BBPresetsApp {
     constructor(host,{notify=()=>{},visible=()=>!globalThis.document?.hidden}={}) {
         this.host=host;this.notify=notify;this.visible=visible;this.epoch=0;this.story=null;this.profile=null;this.listeners=new Set();this.edits=Promise.resolve();this.running=null;this.controller=null;this.temporary='';this.error='';this.status='loading';this.lastInjection={text:'',omitted:0};this.stats={calls:0,success:0,failed:0,usage:null};this.ready=false;
+        this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';
     }
     changed(){for(const fn of this.listeners)fn();}
     report(error){this.error=error.message??String(error);this.notify(this.error,'error');this.changed();}
@@ -27,8 +30,17 @@ export class BBPresetsApp {
         this.queueTimer=setInterval(()=>this.resumeQueue(),1000);this.queueTimer.unref?.();
     }
     get foreground(){return this.host.isForeground?.()??this.host.foreground;}
-    async resumeQueue(){if(!this.ready||!this.visible()||this.foreground)return;try{await this.host.flushSourceIds?.();if(this.story?.data.jobs.some(j=>j.state==='queued'))await this.drain();}catch(e){this.report(e);}}
-    suspend(){this.epoch++;this.ready=false;this.controller?.abort();this.auxController?.abort();this.initialization=null;this.host.inject('');this.lastInjection={text:'',omitted:0};}
+    async resumeQueue(){if(!this.visible()||this.foreground||this.resumeTask||this.preparing||this.buildingInitialization)return;try{if(this.needsRefresh&&!this.running&&!this.auxiliary){await this.resume();return;}if(!this.ready)return;await this.host.flushSourceIds?.();if(this.story?.data.jobs.some(j=>j.state==='queued'))await this.drain();}catch(e){this.report(e);}}
+    background(){this.needsRefresh=true;this.changed();}
+    async resume(){
+        if(!this.repo||!this.visible())return;
+        this.needsRefresh=true;
+        if(this.running||this.auxiliary||this.preparing||this.buildingInitialization||this.resumeTask)return this.resumeTask;
+        this.resumeTask=(async()=>{await this.refresh();this.needsRefresh=false;const entry=this.draftEntry();if(entry?.dirty)await this.flushDraft();if(this.story?.data.jobs.some(j=>j.state==='failed'&&j.retryable))await this.edit(this.story.data.id,d=>{for(const j of d.jobs)if(j.retryable){j.state='queued';delete j.retryable;}return d;});})();
+        try{await this.resumeTask;}finally{this.resumeTask=null;}
+        await this.drain();
+    }
+    suspend(){this.epoch++;this.ready=false;clearTimeout(this.draftTimer);this.controller?.abort();this.auxController?.abort();this.host.inject('');this.lastInjection={text:'',omitted:0};}
     async refresh() {
         this.suspend();const epoch=this.epoch;await this.edits;await this.repo.refresh();
         let profile=await this.repo.load('profile');
@@ -40,6 +52,7 @@ export class BBPresetsApp {
         this.branchCandidate=binding&&binding.chatKey!==chatKey?copy(binding):null;
         if(binding?.chatKey===chatKey && this.repo.index.documents[binding.storyId])this.story=await this.repo.load(binding.storyId);
         if(epoch!==this.epoch)return;
+        await this.loadDraft();if(epoch!==this.epoch)return;
         this.ready=true;this.error='';this.status='saved';
         if(this.story)await this.reconcile();
         this.changed();
@@ -79,12 +92,14 @@ export class BBPresetsApp {
         this.host.ctx().chatMetadata.bbpresetsBinding={storyId:id,chatKey:identity.chatKey};
         await this.host.ctx().saveMetadata();
         assert(epoch===this.epoch&&this.host.identity().chatKey===identity.chatKey,'保存绑定期间聊天变化');
+        await this.loadDraft();assert(epoch===this.epoch,'读取草稿期间故事已切换');
         this.ready=true;this.changed();
         await this.reconcile();
     }
     async reconcile() {
         if(!this.story||!this.ready||!this.visible())return;
         const context=await this.host.capture(),storyId=this.story.data.id;
+        this.currentSources=context.sources;
         const hashes=new Map(context.sources.map(s=>[s.id,s.hash]));
         if(this.activeJob?.sources.some(s=>s.chatKey===context.chatKey&&hashes.get(s.id)!==s.hash))this.controller?.abort();
         await this.edit(storyId,d=>invalidateSources(d,context.chatKey,context.sources));
@@ -130,14 +145,15 @@ export class BBPresetsApp {
             if(epoch===this.epoch){this.lastInjection=injection(this.profile.data,this.story.data,this.settings,temporary);this.host.inject(this.lastInjection.text);}
         } else prepare().then(()=>this.drain()).catch(e=>this.report(e));
     }
-    async queueJob(kind,{context,pairs,key=uid(),feedback=[]}={}) {
+    async queueJob(kind,{context,pairs,key=uid(),feedback=[],note=''}={}) {
         assert(this.story,'请先选择 BBPresets 存档');const epoch=this.epoch,storyId=this.story.data.id;context??=await this.host.capture();
         const selected=pairs??context.pairs.slice(-this.settings.contextRounds);
         const rows=selected.flatMap(p=>p.rows);
         let input=rows.map(r=>`${r.role} ${r.name}:\n${r.text}`).join('\n\n');
-        if(kind==='initialization')input=await this.initializationInput(context,feedback[0]?.note??'');
+        if(kind==='initialization')input=await this.initializationInput(context,note||feedback[0]?.note||'');
         else if(this.settings.memoryRead){const memory=await this.confirmedMemory();if(memory)input+='\nBB-Memory 同故事只读资料：'+JSON.stringify(memory).slice(0,10000);}
-        input=kind==='initialization'?input.slice(0,this.settings.maxInputChars):input.slice(-this.settings.maxInputChars);
+        if(kind==='initialization')assert(input.length<=this.settings.maxInputChars,'初始化内容超过当前维护材料预算；回答已保留，请在设置中提高预算后重试');
+        else input=input.slice(-this.settings.maxInputChars);
         const sources=kind==='initialization'?context.sources:selected.flatMap(p=>p.sources),anchor=sources.at(-1)??null;
         const job={id:uid(),kind,key,chatKey:context.chatKey,input,sources,anchor,feedback:copy(feedback),at:Date.now(),attempts:0,state:'queued',...(kind==='world'?{pairKeys:selected.map(p=>'world:'+p.key)}:{})};
         assert(epoch===this.epoch&&context.chatKey===this.host.identity().chatKey,'准备维护期间聊天已变化');
@@ -145,7 +161,7 @@ export class BBPresetsApp {
         return job;
     }
     drain({before=false}={}) {
-        if(this.auxiliary)return Promise.resolve();
+        if(this.auxiliary||this.preparing||this.resumeTask)return Promise.resolve();
         if(this.running)return this.running;
         const run=async()=>{
             while(this.story&&this.ready&&this.visible()&&this.settings.enabled){
@@ -158,19 +174,21 @@ export class BBPresetsApp {
     }
     async runJob(job) {
         const epoch=this.epoch,storyId=this.story.data.id,settings=copy(this.settings),baseHash=await hash(JSON.stringify(this.story.data.records));
-        this.controller=new AbortController();const controller=this.controller,timer=setTimeout(()=>controller.abort(),settings.timeoutSeconds*1000);
+        this.controller=new AbortController();const controller=this.controller;
         this.activeJob=job;
         try{
             const material=maintenanceMaterial(job,this.story.data,this.profile.data),prompt=maintenancePrompt(job,this.story.data,this.profile.data,material);
+            const promptHash=await hash(prompt);
             this.stats.materialOmitted=material.omitted;
             await this.edit(storyId,d=>{const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已失效');j.attempts++;return d;});
             this.changed();
             const beforeContext=await this.host.capture(),hashes=new Map(beforeContext.sources.map(s=>[s.id,s.hash]));
+            this.currentSources=beforeContext.sources;
             assert(beforeContext.chatKey===job.chatKey&&job.sources.every(s=>s.chatKey!==job.chatKey||hashes.get(s.id)===s.hash),'任务来源已变化，请重新维护');
             assert(epoch===this.epoch&&!controller.signal.aborted,'任务已取消');
-            this.stats.calls++;this.changed();
-            const result=await this.host.request(prompt,settings,controller.signal);
-            assert(!controller.signal.aborted&&epoch===this.epoch&&this.visible(),'维护结果已过期');
+            const cacheKey=`result:${storyId}:${job.id}`,cached=this.resultCache.get(cacheKey)??await this.readLocal(cacheKey);
+            const result=cached?.baseHash===baseHash&&cached?.promptHash===promptHash&&cached?.chatKey===job.chatKey?cached.result:await this.request(prompt,settings,controller.signal);
+            assert(!controller.signal.aborted&&epoch===this.epoch,'维护结果已过期');
             const context=await this.host.capture();
             assert(context.chatKey===job.chatKey,'任务所属聊天已切换');
             const current=new Map(context.sources.map(s=>[s.id,s.hash]));
@@ -182,23 +200,25 @@ export class BBPresetsApp {
                 assert(await hash(JSON.stringify(d.records))===baseHash,'资料已被修改，请重试维护以合并最新资料');
                 const options={origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor,feedbackIds:job.feedback.map(f=>f.id).filter(Boolean)};
                 const candidate=applyChanges(d,changes,options); // Validate protection even in review mode.
+                const resultCopy={baseHash,promptHash,chatKey:job.chatKey,result};this.resultCache.set(cacheKey,resultCopy);await this.writeLocal(cacheKey,resultCopy);
                 const important=changes.some(c=>c.op==='remove'||c.record?.importance==='major'||d.records.find(r=>r.id===(c.id??c.record?.id))?.importance==='major') || job.kind==='feedback'||job.kind==='initialization';
                 let next;
                 if(changes.length && settings.mode!=='auto' && (settings.mode==='manual'||important)) {
-                    next=d;next.proposals.push({...job,changes,baseHash,state:'review'});
+                    next=d;next.proposals.push({...job,changes,baseHash,state:'review',completedAt:Date.now()});
                 } else next=candidate;
                 next.jobs=next.jobs.filter(j=>j.id!==job.id);
                 if(!next.proposals.some(p=>p.id===job.id)){next.processed=[...new Set([...next.processed,...job.pairKeys??[]])];for(const f of next.feedback)if(job.feedback.some(x=>x.id===f.id))f.status='processed';}
                 return next;
-            },{guard:()=>epoch===this.epoch&&this.visible()&&!controller.signal.aborted&&this.host.identity().chatKey===job.chatKey});
+            },{guard:()=>epoch===this.epoch&&!controller.signal.aborted&&this.host.identity().chatKey===job.chatKey});
+            this.resultCache.delete(cacheKey);await this.writeLocal(cacheKey,null).catch(()=>{});
             this.stats.success++;this.stats.usage=result?.usage??null;
         }catch(error){
             this.stats.failed++;
             if(epoch===this.epoch&&this.story?.data.id===storyId){
-                await this.edit(storyId,d=>{const j=d.jobs.find(j=>j.id===job.id);if(j){j.state='failed';j.error=String(error.message).slice(0,300);}return d;}).catch(()=>{});
+                await this.edit(storyId,d=>{const j=d.jobs.find(j=>j.id===job.id);if(j){j.state='failed';j.retryable=transient(error);j.error=String(error.message).slice(0,300);}return d;}).catch(()=>{});
                 this.report(error);
             }
-        }finally{clearTimeout(timer);if(this.controller===controller){this.controller=null;this.activeJob=null;}this.changed();}
+        }finally{if(this.controller===controller){this.controller=null;this.activeJob=null;}this.requestState='';this.changed();}
     }
     async reviewProposal(id,accept) {
         const context=await this.host.capture(),now=new Map(context.sources.map(s=>[s.id,s.hash]));
@@ -213,11 +233,13 @@ export class BBPresetsApp {
         assert(this.settings?.enabled,'请先在设置中启用 BBPresets');
         assert(!this.auxiliary,'正在准备问题或测试连接，请稍后重试');
         assert(!this.foreground,'请等当前正文完成后再手动维护');
-        if(kind==='initialization')await this.queueJob(kind,{feedback:[{note}]});else await this.queueJob(kind);
+        if(kind==='initialization')await this.queueJob(kind,{note});else await this.queueJob(kind);
         await this.drain();
+        return this.story?.data.jobs.some(j=>j.kind===kind&&j.state==='failed')?'维护未完成，输入已保留；请在维护页检查原因并重试':this.story?.data.jobs.some(j=>j.kind===kind)?'任务已排队，等待连接空闲':this.story?.data.proposals.some(p=>p.kind===kind)?'维护已完成，有提案待审阅':'维护已完成';
     }
     async initializationInput(context,note='') {
-        const budget=Math.floor(this.settings.maxInputChars*.55),seed=await this.host.seed(Math.floor(budget*.5));
+        assert(note.length+1000<this.settings.maxInputChars,'初始化回答超过当前维护材料预算；全文已保留，请提高设置中的预算后重试');
+        const budget=Math.max(500,Math.floor((this.settings.maxInputChars-note.length-1000)*.55)),seed=await this.host.seed(Math.floor(budget*.5));
         const recent=context.rows.slice(-this.settings.contextRounds*2-1).map(r=>`${r.role} #${r.floor}: ${r.text}`).join('\n');
         let memory='未启用同故事记忆读取';
         if(this.settings.memoryRead)memory=JSON.stringify(await this.confirmedMemory()??'未确认对应存档，本次未读取记忆');
@@ -227,28 +249,108 @@ export class BBPresetsApp {
         assert(!this.running&&!this.auxiliary,'已有维护或连接请求，请完成后重试');
         if(settings.connection==='main')assert(!this.foreground&&!this.host.rawPending,'酒馆主连接正在生成，请完成后重试');
         const controller=new AbortController(),epoch=this.epoch;
-        this.auxController=controller;this.auxiliary=true;this.stats.calls++;this.changed();
-        const timer=setTimeout(()=>controller.abort(),settings.timeoutSeconds*1000);
-        try{const raw=await this.host.request(prompt,copy(settings),controller.signal,options);assert(!controller.signal.aborted&&epoch===this.epoch,'聊天或设置已变化，请重新操作');const result=validate(raw);this.stats.success++;return result;}
+        this.auxController=controller;this.auxiliary=true;this.changed();
+        try{const raw=await this.request(prompt,copy(settings),controller.signal,options);assert(!controller.signal.aborted&&epoch===this.epoch,'聊天或设置已变化，请重新操作');const result=validate(raw);this.stats.success++;return result;}
         catch(e){this.stats.failed++;throw e;}
-        finally{clearTimeout(timer);this.auxiliary=false;if(this.auxController===controller)this.auxController=null;this.changed();}
+        finally{this.auxiliary=false;this.requestState='';if(this.auxController===controller)this.auxController=null;this.changed();}
     }
-    async prepareInitialization() {
+    async request(prompt,settings,signal,options={}) {
+        return retryRequest(async child=>{
+            // A timed-out generateRaw can still own ST's main connection. Never overlap it.
+            if(settings.connection==='main')assert(!this.host.rawPending&&!this.foreground,'酒馆主连接仍在处理请求；任务已保留，完成后可重试');
+            this.stats.calls++;this.changed();return this.host.request(prompt,settings,child,options);
+        },{signal,timeoutSeconds:settings.timeoutSeconds,onState:state=>{this.requestState=state;this.changed();},...(this.retryOptions??{})});
+    }
+    async prepareInitialization(mode='replace') {
         assert(this.story&&this.ready,'请先选择当前故事');
+        assert(this.settings?.enabled,'请先启用 BBPresets');
         assert(!this.foreground,'请等当前正文完成后再准备初始化问题');
-        const epoch=this.epoch,storyId=this.story.data.id,context=await this.host.capture();
-        const input=await this.initializationInput(context);
-        assert(epoch===this.epoch,'故事已切换，请重新生成问题');
-        const questions=await this.auxiliaryRequest(INITIALIZATION_TEMPLATE+'\n只读资料：\n'+input,this.settings,{},parseQuestions);
-        const current=await this.host.capture(),hashes=new Map(current.sources.map(s=>[s.id,s.hash]));
-        assert(epoch===this.epoch&&current.chatKey===context.chatKey&&context.sources.every(s=>hashes.get(s.id)===s.hash),'提问期间聊天内容已变化，请重新生成问题');
-        this.initialization={storyId,chatKey:context.chatKey,questions};this.changed();return questions;
+        assert(!this.preparing,'正在生成问题，请稍后');this.preparing=true;
+        const epoch=this.epoch,storyId=this.story.data.id;
+        try{
+            const context=await this.host.capture();
+            this.ensureDraft();this.updateInitialization(d=>{d.request={mode,state:'pending'};});await this.flushDraft();
+            const input=await this.initializationInput(context,draftAnswers(this.initialization));
+            assert(epoch===this.epoch,'故事已切换，请重新生成问题');
+            const questions=await this.auxiliaryRequest(INITIALIZATION_TEMPLATE+`\n本次${mode==='append'?'补充追问：根据已有回答与新想法，询问尚未明确的内容，不重复已答问题。':'生成一组新问题，尊重已有回答。'}\n只读资料：\n`+input,this.settings,{},parseQuestions);
+            const current=await this.host.capture(),hashes=new Map(current.sources.map(s=>[s.id,s.hash]));
+            assert(epoch===this.epoch&&current.chatKey===context.chatKey&&context.sources.every(s=>hashes.get(s.id)===s.hash),'提问期间聊天内容已变化，已有回答仍保留，请重新生成问题');
+            this.updateInitialization(d=>questionSet(d,questions,mode));await this.flushDraft();this.changed();return questions;
+        }catch(error){if(epoch===this.epoch&&storyId===this.story?.data.id){this.updateInitialization(d=>{d.request={mode,state:'failed'};});void this.flushDraft().catch(()=>{});}throw error;}
+        finally{this.preparing=false;this.changed();}
     }
-    async completeInitialization(answer='') {
-        assert([...answer].length<=200,'初始化回答请控制在 200 字以内');
+    async completeInitialization(answer) {
+        assert(!this.buildingInitialization,'初始化正在建立，请稍后');
+        this.buildingInitialization=true;
+        try{
         const draft=this.initialization;
-        assert(draft&&draft.storyId===this.story?.data.id&&draft.chatKey===this.host.identity().chatKey,'请先为当前故事生成简短问题');
-        await this.manual('initialization',draft.questions.map((q,i)=>`${i+1}. ${q.question}`).join('\n')+'\n用户回答：'+answer);
+        assert(draft&&draft.chatKey===this.host.identity().chatKey,'请先为当前故事准备初始化资料');
+        if(answer!==undefined)this.updateInitialization(d=>{d.notes=answer;});
+        await this.flushDraft();
+        assert(![...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='initialization'),'已有初始化任务或提案，请先处理；回答仍保留');
+        await this.manual('initialization',draftAnswers(this.initialization));
+        }finally{this.buildingInitialization=false;this.changed();}
+    }
+    draftKey(){return this.story?`draft:${this.story.data.id}:${this.host.identity().chatKey}`:null;}
+    draftEntry(){return this.drafts.get(this.draftKey());}
+    get initialization(){return this.draftEntry()?.value??null;}
+    async readLocal(key){return this.host.local?await this.host.local.getItem(this.host.prefix+key):null;}
+    writeLocal(key,value){
+        const snapshot=copy(value),write=this.localWrites.then(()=>this.host.local?.setItem(this.host.prefix+key,snapshot));
+        this.localWrites=write.catch(()=>{});return write;
+    }
+    async loadDraft(){
+        const key=this.draftKey();if(!key)return;
+        const remote=this.story.data.initializationDrafts?.find(d=>d.chatKey===this.host.identity().chatKey)??null;
+        const cached=this.drafts.get(key)??await this.readLocal(key);
+        if(key!==this.draftKey())return;
+        if(cached?.dirty){validateDraft(cached.value);this.drafts.set(key,cached);}
+        else if(remote){if(!same(cached?.value,remote))this.draftLoadVersion=(this.draftLoadVersion??0)+1;this.drafts.set(key,{value:copy(remote),base:copy(remote),dirty:false});}
+        else this.drafts.delete(key);
+    }
+    ensureDraft(){
+        assert(this.story&&this.ready,'请先选择当前故事');
+        if(!this.draftEntry()){const remote=this.story.data.initializationDrafts?.find(d=>d.chatKey===this.host.identity().chatKey)??null;this.drafts.set(this.draftKey(),{value:copy(remote)??newDraft(this.host.identity().chatKey),base:copy(remote),dirty:false});}
+        return this.initialization;
+    }
+    updateInitialization(change){
+        this.ensureDraft();const key=this.draftKey(),entry=this.draftEntry(),draft=copy(entry.value);
+        entry.value=change(draft)??draft;entry.value.updatedAt=Math.max(Date.now(),entry.value.updatedAt+1);entry.dirty=true;
+        void this.writeLocal(key,{value:entry.value,base:entry.base,dirty:entry.dirty}).catch(()=>{this.draftError='本设备草稿写入失败，请保持页面打开并保存到服务器';this.changed();});
+        clearTimeout(this.draftTimer);this.draftTimer=setTimeout(()=>this.flushDraft().catch(e=>{this.draftError=e.message;this.changed();}),650);this.draftTimer.unref?.();
+        this.draftError='';this.changed();
+    }
+    async flushDraft(){
+        clearTimeout(this.draftTimer);
+        const key=this.draftKey(),entry=this.draftEntry();if(!entry?.dirty)return;
+        if(entry.saving){await entry.saving;if(entry.dirty&&key===this.draftKey())return this.flushDraft();return;}
+        const value=copy(entry.value),base=copy(entry.base),storyId=this.story.data.id;
+        const work=this.edit(storyId,d=>{
+            d.initializationDrafts??=[];const index=d.initializationDrafts.findIndex(x=>x.chatKey===value.chatKey),current=d.initializationDrafts[index]??null;
+            assert(same(current,base)||same(current,value),'服务器已有不同的初始化草稿；本设备输入仍保留，请先检查服务器版本或导出草稿，避免覆盖');
+            if(index<0)d.initializationDrafts.push(value);else d.initializationDrafts[index]=value;return d;
+        });
+        // Never put a Promise in persisted draft data.
+        entry.saving=work;
+        try{await work;entry.base=value;entry.dirty=!same(value,entry.value);this.draftError='';}
+        finally{delete entry.saving;await this.writeLocal(key,{value:entry.value,base:entry.base,dirty:entry.dirty});this.changed();}
+        if(entry.dirty&&key===this.draftKey())return this.flushDraft();
+    }
+    async saveCurrent(){
+        assert(this.ready&&this.story,'请先选择当前存档');
+        const epoch=this.epoch,id=this.story.data.id;
+        await this.flushDraft();await this.edits;
+        assert(epoch===this.epoch&&id===this.story?.data.id,'故事已切换，请在当前故事重新保存');
+        await this.edit(id,d=>{d.manualSavedAt=Math.max(Date.now(),(d.manualSavedAt??0)+1);return d;});
+        return '当前存档已保存到酒馆服务器；可在“恢复 / 导出”查看版本';
+    }
+    get progress(){
+        const d=this.story?.data;if(!d)return {floor:null,reflectionAt:null};
+        const chatKey=this.host.identity().chatKey,now=new Map((this.currentSources??[]).map(s=>[s.id,s]));
+        const events=[...d.history.map(h=>({...h,kind:h.origin})),...d.proposals.map(p=>({...p,at:p.completedAt??p.at,review:true}))].reverse().sort((a,b)=>b.at-a.at);
+        const world=events.find(h=>h.kind==='world'&&h.sources?.length&&h.sources.every(s=>s.chatKey===chatKey&&now.get(s.id)?.hash===s.hash));
+        const reflection=events.find(h=>h.kind==='reflection');
+        return {floor:world?Math.max(...world.sources.map(s=>now.get(s.id).floor)):null,worldReview:world?.review,reflectionAt:reflection?.at??null,reflectionReview:reflection?.review};
     }
     async testConnection(settings=this.settings,key=this.host.key) {
         validateSettings(settings);
@@ -279,8 +381,9 @@ export class BBPresetsApp {
         await this.drain();
     }
     async withdrawFeedback(id){this.controller?.abort();await this.edit(this.story.data.id,d=>{const f=d.feedback.find(f=>f.id===id);assert(f,'点评不存在');f.status='withdrawn';d.jobs=d.jobs.filter(j=>!j.feedback.some(x=>x.id===id));d.proposals=d.proposals.filter(j=>!j.feedback.some(x=>x.id===id));const affected=d.history.filter(h=>h.feedbackIds?.includes(id)).flatMap(h=>h.changes.map(c=>c.id));d.excluded=[...new Set([...d.excluded,...affected])];d.conflicts.push({id:uid(),reason:'feedback-withdrawn',feedbackId:id,at:Date.now()});return d;});}
-    async saveSettings(settings){validateSettings(settings);await this.edit('profile',d=>{d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();if(!settings.enabled)this.host.inject('');}
-    async retryJobs(){await this.edit(this.story.data.id,d=>{d.jobs.forEach(j=>{j.state='queued';delete j.error;});return d;});await this.drain();}
+    async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();if(!settings.enabled)this.host.inject('');}
+    async retryJobs(){assert(this.story,'请先选择当前存档');await this.edit(this.story.data.id,d=>{d.jobs.forEach(j=>{j.state='queued';delete j.error;delete j.retryable;});return d;});await this.drain();return this.story.data.jobs.some(j=>j.state==='failed')?'仍有失败任务，请查看维护页原因':this.story.data.jobs.length?'任务已排队':'维护队列已完成';}
+    cancelRequests(){this.controller?.abort();this.auxController?.abort();return '已停止当前请求；问答与未完成任务保留';}
     async bindMemory(){const m=await this.host.memorySnapshot();assert(m?.available,m?.reason??'未检测到可验证的 BB-Memory 当前存档');await this.edit(this.story.data.id,d=>{d.memoryBinding={signature:m.signature,character:m.character,slotName:m.slotName,stamp:m.stamp};return d;});}
     async confirmedMemory(){const m=await this.host.memorySnapshot();return m?.available&&m.signature===this.story?.data.memoryBinding?.signature?m.data:null;}
     async followMemory(){

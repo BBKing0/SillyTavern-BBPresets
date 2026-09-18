@@ -24,13 +24,14 @@ export async function start(){
         globalThis.addEventListener('pageshow',resume);
         globalThis.addEventListener('pagehide',pause);
         globalThis.addEventListener('beforeunload',leaving);
+        globalThis.addEventListener('online',resume);
     })();return starting;
 }
-function pause(){app?.suspend();}
-async function resume(){if(!app?.repo||destroyed||document.hidden)return;try{await app.refresh();await app.drain();}catch(e){app.report(e);}}
+function pause(){app?.background();}
+async function resume(){if(!app?.repo||destroyed||document.hidden)return;try{await app.resume();}catch(e){app.report(e);}}
 function visibility(){if(document.hidden)pause();else void resume();}
-function leaving(event){if(app?.status==='saving'||app?.running){event.preventDefault();event.returnValue='';}}
-export function destroy(){destroyed=true;workbench?.destroy();styleLink?.remove();app?.destroy();document.removeEventListener('visibilitychange',visibility);globalThis.removeEventListener('pageshow',resume);globalThis.removeEventListener('pagehide',pause);globalThis.removeEventListener('beforeunload',leaving);delete globalThis.bbPresetsInterceptor;}
+function leaving(event){if(app?.status==='saving'||app?.running||app?.auxiliary||app?.preparing||app?.buildingInitialization||app?.draftEntry()?.dirty){event.preventDefault();event.returnValue='';}}
+export function destroy(){destroyed=true;workbench?.destroy();styleLink?.remove();app?.destroy();document.removeEventListener('visibilitychange',visibility);globalThis.removeEventListener('pageshow',resume);globalThis.removeEventListener('pagehide',pause);globalThis.removeEventListener('beforeunload',leaving);globalThis.removeEventListener('online',resume);delete globalThis.bbPresetsInterceptor;}
 // Extensions load after the host bootstrap; a small readiness retry also supports slower devices.
 let tries=0;
 function ready(){if(destroyed)return;if(!document.body||!globalThis.SillyTavern?.getContext){if(++tries<60)setTimeout(ready,500);else console.error('[BBPresets] 酒馆上下文未就绪，请刷新页面');return;}void start().catch(e=>{console.error('[BBPresets]',e);globalThis.toastr?.error(e.message,'BBPresets',{escapeHtml:true});});}

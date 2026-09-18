@@ -44,6 +44,13 @@ export class Repository {
         const work = this.queue.then(()=>this.commit(data,expectedRevision,guard));
         this.queue=work.catch(()=>{}); return work;
     }
+    async writeVerified(file,value) {
+        // An upload can succeed even when the acknowledgement is lost on a network switch.
+        // Resolve that uncertainty by reading the exact value; never blindly republish an index.
+        try{await this.transport.write(file,value);}
+        catch(error){if(!same(await this.transport.read(file).catch(()=>null),value))throw error;}
+        assert(same(await this.transport.read(file),value),'服务器回读不一致；本次内容保留在恢复区');
+    }
     async commit(data,expectedRevision,guard) {
         validateDocument(data);
         const pendingId=uid();
@@ -56,23 +63,19 @@ export class Repository {
             assert((remote.documents[data.id]?.revision ?? 0) === expectedRevision, '资料版本已变化，不能覆盖');
             const revision=expectedRevision+1, file=`bbpresets-doc-${data.id}-${uid()}.json`;
             const snapshot={schema:1,id:data.id,revision,data:copy(data),digest:await hash(JSON.stringify(data)),at:Date.now()};
-            await this.transport.write(file,snapshot);
-            const written=await this.transport.read(file);
-            assert(written && same(written,snapshot), '服务器版本回读验证失败');
+            await this.writeVerified(file,snapshot);
             assert(guard(), '保存期间页面或故事已变化，版本保留但不发布');
             // Best-effort stale-client detection. This is NOT a server compare-and-swap.
             const latest=validateIndex(await this.transport.read(INDEX) ?? empty());
             assert(latest.commitId === remote.commitId, '发布前发现服务器已更新，本次版本保留待恢复');
             if (remote.revision > 0) {
-                await this.transport.write(BACKUP,remote);
-                assert(same(await this.transport.read(BACKUP),remote), '索引备份失败，停止发布');
+                await this.writeVerified(BACKUP,remote);
             }
             assert(guard(), '发布前任务已失效');
             const next=copy(remote), old=remote.documents[data.id];
             next.revision++; next.commitId=uid();
             next.documents[data.id]={file,revision,title:data.title,type:data.type,at:snapshot.at,history:[...(old?.history ?? []),...(old ? [{file:old.file,revision:old.revision,at:old.at}] : [])]};
-            await this.transport.write(INDEX,next);
-            assert(same(await this.transport.read(INDEX),next), '索引回读不一致；请刷新并检查保存状态');
+            await this.writeVerified(INDEX,next);
             this.index=next;
             await this.recovery.remove(pendingId);
             this.onStatus('saved');

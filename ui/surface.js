@@ -1,5 +1,5 @@
 // Shared stylesheet for the host entry and the isolated floating workspace.
-export const STYLE_URL = new URL('../style.css?v=0.3.1', import.meta.url).href;
+export const STYLE_URL = new URL('../style.css?v=0.4.0', import.meta.url).href;
 export function loadStyle(root) {
     const link = document.createElement('link');
     link.rel = 'stylesheet';

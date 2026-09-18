@@ -1,4 +1,5 @@
 import {sha256} from './digest.js';
+import {validateDraft} from './initialization.js';
 export const SCHEMA = 1;
 export const KINDS = ['world', 'guide', 'focus', 'experience'];
 export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: true, contextRounds: 6, maxInputChars: 40000, injectionChars: 9000, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false });
@@ -12,7 +13,8 @@ export function validId(id) { return typeof id === 'string' && /^[a-zA-Z0-9_-]{1
 function keys(value, allowed) { assert(Object.keys(value).every(k=>allowed.includes(k)), '包含不支持的字段'); }
 export function validateRecord(r) {
     assert(r && validId(r.id) && KINDS.includes(r.kind), '条目身份或类别无效');
-    keys(r,['id','kind','title','blocks','locked','truth','status','importance','origin','sources']);
+    keys(r,['id','kind','title','blocks','locked','truth','status','importance','origin','sources','joiner']);
+    assert(r.joiner===undefined||['','\n\n'].includes(r.joiner),'文字连接方式无效');
     assert(text(r.title, 300) && typeof r.locked === 'boolean', '条目标题或保护设置无效');
     assert(['plan', 'intent', 'event', 'guidance'].includes(r.truth), '事实状态无效');
     assert(['active', 'archived'].includes(r.status), '条目状态无效');
@@ -21,12 +23,14 @@ export function validateRecord(r) {
     assert(Array.isArray(r.sources) && r.sources.length <= 5000 && r.sources.every(s => text(s.chatKey, 500) && validId(s.id) && text(s.hash, 100)), '来源无效');
     assert(Array.isArray(r.blocks) && r.blocks.length > 0 && r.blocks.length <= 100, '文字段落数量无效');
     const ids = new Set();
-    for (const b of r.blocks) { keys(b,['id','text','locked']); assert(validId(b.id) && !ids.has(b.id) && text(b.text) && typeof b.locked === 'boolean', '文字段落无效'); ids.add(b.id); }
+    for (const b of r.blocks) { keys(b,['id','text','locked']); assert(validId(b.id) && !ids.has(b.id) && text(b.text,150000) && typeof b.locked === 'boolean', '文字段落无效'); ids.add(b.id); }
     return r;
 }
 export function validateDocument(doc) {
     assert(doc && doc.schema === SCHEMA && ['profile', 'story'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
-    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent']);
+    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt']);
+    if(doc.initializationDrafts!==undefined){assert(Array.isArray(doc.initializationDrafts),'初始化草稿列表无效');const chats=new Set();for(const draft of doc.initializationDrafts){validateDraft(draft);assert(!chats.has(draft.chatKey),'初始化草稿聊天重复');chats.add(draft.chatKey);}}
+    if(doc.manualSavedAt!==undefined)assert(Number.isFinite(doc.manualSavedAt),'手动存档时间无效');
     assert(text(doc.title, 300) && Array.isArray(doc.records) && doc.records.length <= 3000, '文档内容无效');
     const ids = new Set();
     for (const r of doc.records) { validateRecord(r); assert(!ids.has(r.id), '重复条目 ID'); ids.add(r.id); }
@@ -86,7 +90,8 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
             after = copy(change.record);
             if (actor !== 'user') {
                 // Models never own protection or provenance. Do not accept permission flags in model output.
-                assert(after.locked === undefined && after.origin === undefined && after.sources === undefined && after.blocks?.every(b => b.locked === undefined), '模型不能提供保护、来源或权限字段');
+                assert(after.locked === undefined && after.origin === undefined && after.sources === undefined && after.joiner === undefined && after.blocks?.every(b => b.locked === undefined), '模型不能提供保护、来源或权限字段');
+                if(before?.joiner!==undefined)after.joiner=before.joiner;
                 after.locked = before?.locked ?? false;
                 after.blocks = after.blocks.map(b => ({...b, locked:before?.blocks.find(x=>x.id === b.id)?.locked ?? false}));
                 after.origin = origin;
@@ -178,5 +183,6 @@ export function restoreDocument(current, historical) {
     // Recovery is a new version, retaining the complete audit trail and current feedback.
     next.history = [...current.history,{id:uid(),key:uid(),actor:'user',origin:'restore',sources:[],anchor:null,at:Date.now(),changes:current.records.map(r=>({id:r.id,before:copy(r),after:next.records.find(x=>x.id===r.id) ?? null})).concat(next.records.filter(r=>!current.records.some(x=>x.id===r.id)).map(r=>({id:r.id,before:null,after:copy(r)})))}];
     next.feedback = copy(current.feedback); next.jobs = []; next.proposals = [];
+    if(current.initializationDrafts)next.initializationDrafts=copy(current.initializationDrafts);
     return validateDocument(next);
 }

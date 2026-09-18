@@ -1,4 +1,5 @@
 import {assert,copy,hash,uid,validId} from '../core/model.js';
+import {networkError,retryRequest} from './network.js';
 
 export class TavernHost {
     constructor(context = ()=>globalThis.SillyTavern?.getContext()) { this.context=context;this.foreground=false;this.rawPending=false;this.disposers=[];this.key=''; }
@@ -100,7 +101,7 @@ export class TavernHost {
     transport() {
         const check=n=>assert(/^bbpresets-[a-zA-Z0-9_-]+\.json$/.test(n),'文件名越界');
         return {
-            read:async name=>{check(name);const response=await fetch(`/user/files/${name}`,{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(30000)});if(response.status===404)return null;assert(response.ok,`读取服务器失败 HTTP ${response.status}`);const body=await response.text();assert(body.length<12_000_000,'服务器资料过大');return JSON.parse(body);},
+            read:async name=>{check(name);return retryRequest(async signal=>{const response=await fetch(`/user/files/${name}`,{cache:'no-store',credentials:'same-origin',signal});if(response.status===404)return null;if(!response.ok)throw networkError(`读取服务器失败 HTTP ${response.status}`,[408,429,500,502,503,504].includes(response.status));const body=await response.text();assert(body.length<12_000_000,'服务器资料过大');return JSON.parse(body);},{timeoutSeconds:30});},
             write:async(name,value)=>{check(name);const bytes=new TextEncoder().encode(JSON.stringify(value));assert(bytes.length<10_000_000,'保存资料超过 10 MB，请拆分存档');let binary='';for(let i=0;i<bytes.length;i+=16384)binary+=String.fromCharCode(...bytes.subarray(i,i+16384));const response=await fetch('/api/files/upload',{method:'POST',headers:this.ctx().getRequestHeaders(),credentials:'same-origin',body:JSON.stringify({name,data:btoa(binary)}),signal:AbortSignal.timeout(30000)});assert(response.ok,`保存服务器失败 HTTP ${response.status}`);const result=await response.json();assert(result.path===`/user/files/${name}`,'服务器返回了意外的文件路径');},
         };
     }
@@ -113,7 +114,7 @@ export class TavernHost {
             const pending=Promise.resolve().then(()=>this.ctx().generateRaw({systemPrompt,prompt}));
             pending.finally(()=>{this.rawPending=false;}).catch(()=>{});
             // Do not call stopGeneration: it can stop the user's RP. Late results are ignored.
-            return await abortable(pending,signal);
+            try{return await abortable(pending,signal);}catch(error){if(!signal.aborted&&/abort|fetch|network|load failed/i.test(error.message))throw networkError('酒馆主连接暂时中断，正在保留任务以便重试');throw error;}
         }
         let endpoint;try{endpoint=new URL(settings.endpoint);}catch{throw Error('请配置完整的独立 API 地址');}
         assert(['https:','http:'].includes(endpoint.protocol)&&!endpoint.username&&!endpoint.password&&!endpoint.search&&!endpoint.hash,'API 地址必须是无凭据、无查询参数的 HTTP(S) URL');
@@ -121,9 +122,9 @@ export class TavernHost {
         assert(settings.model?.trim(),'请填写独立模型名称');
         let response;
         try{response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},body:JSON.stringify({model:settings.model,messages:[{role:'system',content:systemPrompt},{role:'user',content:prompt}],temperature:0.4,stream:false}),signal});}
-        catch{throw Error(signal.aborted?'API 请求已取消或超时，请稍后重试':'无法连接独立 API，请检查地址、网络和服务端跨域设置；HTTPS 酒馆请使用 HTTPS API');}
-        assert(response.ok,`模型请求失败 HTTP ${response.status}`);
-        const data=await response.json();return {text:data.choices?.[0]?.message?.content??'',usage:data.usage??null};
+        catch{throw networkError(signal.aborted?'API 请求已取消或超时，请稍后重试':'无法连接独立 API，请检查地址、网络和服务端跨域设置；HTTPS 酒馆请使用 HTTPS API',!signal.aborted);}
+        if(!response.ok)throw networkError(`模型请求失败 HTTP ${response.status}`,[408,429,500,502,503,504].includes(response.status));
+        let data;try{data=await response.json();}catch(error){if(error instanceof SyntaxError)throw Error('API 返回的内容不是有效 JSON，请检查接口协议');throw networkError('接收模型响应时网络中断');}return {text:data.choices?.[0]?.message?.content??'',usage:data.usage??null};
     }
     async memorySnapshot() {
         const c=this.ctx(),{character,chat}=this.identity(),binding=c.extensionSettings?.bb_memory?.chatSlotBindings?.entries?.[character]?.[chat];

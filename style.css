@@ -3,8 +3,8 @@
 /* Theme hue is retained, but alpha must never make the workspace transparent. */
 @supports (color:rgb(from white r g b / 1)) { .bbp-entry,.bbp-dialog,.bbp-ball { --bbp-text:rgb(from var(--SmartThemeBodyColor,#e5e5e5) r g b / 1); --bbp-bg:rgb(from var(--SmartThemeBlurTintColor,#262626) r g b / 1); } }
 .bbp-entry *,.bbp-dialog * { box-sizing:border-box; }
-.bbp-entry { padding:.6rem; border:1px solid var(--bbp-border); border-radius:.5rem; margin:.5rem 0; }
-.bbp-entry .bbp-entry-toggle { width:100%; margin:0; text-align:left; justify-content:space-between; background:var(--bbp-bg); }
+.bbp-entry { padding:0; border:0; margin:0; color:inherit; font:inherit; }
+.bbp-entry .bbp-entry-toggle { cursor:pointer; }
 .bbp-entry .bbp-entry-content:not([hidden]) { display:block; }
 .bbp-entry .bbp-entry-content[hidden],.bbp-ball[hidden] { display:none!important; }
 .bbp-entry-pages { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.35rem; }
@@ -12,6 +12,7 @@
 .bbp-entry .bbp-field { margin:.7rem 0; }
 .bbp-dialog { position:fixed; pointer-events:auto; z-index:2; display:flex; flex-direction:column; min-height:0; padding:0; margin:0; overflow:hidden; background:var(--bbp-bg); border:1px solid var(--bbp-border); border-radius:.65rem; box-shadow:0 .5rem 2rem #0006; }
 .bbp-dialog[hidden] { display:none!important; }
+.bbp-dialog [hidden] { display:none!important; }
 .bbp-dialog header { display:flex; align-items:center; gap:.5rem; padding:.6rem .8rem; border-bottom:1px solid var(--bbp-border); flex-shrink:0; }
 .bbp-dialog header strong { font-size:1.1em; }
 .bbp-dialog header span { flex:1; font-size:.75em; opacity:.8; }
@@ -49,3 +50,26 @@
 .bbp-ball[data-error=true]::after { content:'!'; position:absolute; right:-.15rem; top:-.15rem; width:1rem; height:1rem; font:bold .75rem/1rem sans-serif; border-radius:50%; color:var(--bbp-bg); background:var(--bbp-text); }
 @media(max-width:600px) { .bbp-dialog main { padding:.2rem .7rem 1rem; } .bbp-dialog header { padding:.4rem .6rem; } .bbp-dialog header span { display:none; } .bbp-dialog header strong { flex:1; } .bbp-status { padding:.4rem .6rem; max-height:4.8rem; } .bbp-dialog input,.bbp-dialog textarea,.bbp-dialog select { font-size:16px; } }
 @media(max-height:500px) { .bbp-status { max-height:2rem; padding:.15rem .6rem; } .bbp-dialog header { padding:.15rem .4rem; } .bbp-dialog nav { padding:.1rem; } .bbp-dialog header button,.bbp-dialog nav button { min-height:2rem; padding:.2rem .4rem; } .bbp-message { max-height:1.6rem; padding:.1rem .6rem; } }
+
+/* Full management stays in ST's own drawer. Only the quick menu floats. */
+.bbp-pane { display:block; min-width:0; width:100%; }
+.bbp-entry > .bbp-entry-content { padding:0; }
+.bbp-entry > .bbp-entry-content > .checkbox_label { display:flex; align-items:center; gap:.5em; margin:.5em 0; }
+.bbp-embedded { position:static; width:100%; height:auto; max-width:100%; border:0; border-radius:0; box-shadow:none; background:transparent; overflow:visible; }
+.bbp-embedded header { flex-wrap:wrap; justify-content:space-between; padding:.4rem 0; }
+.bbp-embedded .bbp-status { max-height:none; padding:.5rem 0; }
+.bbp-embedded nav { flex-wrap:wrap; padding:.3rem 0; overflow:visible; }
+.bbp-embedded nav button { flex:1 1 auto; margin:.1rem; font-size:.83em; }
+.bbp-embedded main { flex:initial; overflow:visible; padding:0 0 1rem; scrollbar-gutter:auto; }
+.bbp-embedded .bbp-message { padding:.3rem 0; }
+.bbp-embedded .bbp-card { margin:.6rem 0; padding:.6rem; }
+.bbp-text-section { margin:.5rem 0; }
+.bbp-text-section .bbp-field { margin:.5rem 0; }
+.bbp-protected { border-left:3px solid var(--bbp-accent); padding-left:.6rem; }
+.bbp-question h3 { line-height:1.6; }
+.bbp-quick { height:auto; }
+.bbp-quick main { flex:1 1 auto; }
+.bbp-quick main > button { width:calc(50% - .4rem); font-size:.9em; }
+.bbp-quick .bbp-status { white-space:pre-line; max-height:8rem; }
+.bbp-quick textarea { min-height:3.5rem; }
+@media(max-height:500px) { .bbp-quick .bbp-status { max-height:3rem; } }
