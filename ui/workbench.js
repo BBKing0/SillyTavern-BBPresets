@@ -1,4 +1,5 @@
 import {assert,copy,record,uid} from '../core/model.js';
+import {loadStyle,clampPosition} from './surface.js';
 
 // All imported/model/user text is rendered as text, never markup.
 const el=(tag,text='',className='')=>{const n=document.createElement(tag);n.textContent=text;if(className)n.className=className;return n;};
@@ -11,6 +12,8 @@ const kinds=[['world','世界与节奏'],['guide','写作指南'],['focus','叙�
 const truths=[['plan','构思 / 待验证'],['intent','行动意图'],['event','已发生'],['guidance','写作指导']];
 const when=n=>new Date(n).toLocaleString();
 const body=r=>r?r.blocks.map(b=>b.text).join('\n\n'):'（不存在）';
+const pages=[['overview','概览 / 存档'],['setup','初始化'],['records','作者资料'],['feedback','收藏 / 点评'],['review','维护 / 提案'],['settings','设置'],['versions','恢复 / 导出']];
+const UI_KEY='bbpresets_ui_v1'; // Device layout only: no story data or credentials.
 export function download(value,name='BBPresets-export.json'){
     const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));
     const a=el('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -19,32 +22,64 @@ export function download(value,name='BBPresets-export.json'){
 export class Workbench {
     constructor(app){
         this.app=app;this.tab='overview';this.revealed=false;this.selection=null;this.selectedFeedback=new Set();this.storyId=null;this.editor=null;
+        this.ui={showBall:true};try{const saved=JSON.parse(localStorage.getItem(UI_KEY));if(saved){this.ui.showBall=saved.showBall!==false;if(Number.isFinite(saved.left)&&Number.isFinite(saved.top)){this.ui.left=saved.left;this.ui.top=saved.top;}}}catch{/* Storage restrictions must not prevent opening the workspace. */}
+        this.surface=el('div');this.surface.id='bbpresets-surface';
+        // A zero-size host never intercepts the chat. Only the panel and ball receive pointers.
+        this.surface.style.cssText='position:fixed;inset:0 auto auto 0;width:0;height:0;z-index:100001;pointer-events:none;visibility:hidden';
+        this.shadow=this.surface.attachShadow({mode:'open'});document.body.append(this.surface);
+        loadStyle(this.shadow).ready.then(()=>{if(!this.destroyed){this.surface.style.visibility='visible';this.onResize();}}).catch(e=>this.app.report(e));
         this.dialog=el('aside','','bbp-dialog');this.dialog.hidden=true;this.dialog.id='bbpresets-workbench';this.dialog.setAttribute('aria-label','BBPresets 作者侧栏');
         const header=el('header');header.append(el('strong','BBPresets'),el('span','沃尔古纳 · 作者侧栏'),this.button('收起侧栏',()=>this.close()));
         this.status=el('div','','bbp-status');this.status.setAttribute('role','status');
         this.message=el('div','','bbp-message');this.message.setAttribute('role','status');
         this.nav=el('nav');this.nav.setAttribute('aria-label','工作台页面');
-        for(const [id,label] of [['overview','概览 / 存档'],['setup','初始化'],['records','作者资料'],['feedback','收藏 / 点评'],['review','维护 / 提案'],['settings','设置'],['versions','恢复 / 导出']]){
-            const b=this.button(label,()=>{this.tab=id;this.editor=null;this.render();});b.dataset.tab=id;this.nav.append(b);
+        for(const [id,label] of pages){
+            const b=this.button(label,()=>this.open(id));b.dataset.tab=id;this.nav.append(b);
         }
-        this.content=el('main');this.dialog.append(header,this.status,this.message,this.nav,this.content);document.body.append(this.dialog);
+        this.content=el('main');this.dialog.append(header,this.status,this.message,this.nav,this.content);this.shadow.append(this.dialog);
         this.onChange=()=>{const id=this.app.story?.data.id??null,readyChanged=this.wasReady!==this.app.ready;this.wasReady=this.app.ready;let switched=false;if(id!==this.storyId){this.storyId=id;this.setupAnswer='';this.revealed=false;this.editor=null;this.selectedFeedback.clear();switched=true;}if(!this.dialog.hidden&&(switched||readyChanged))this.render();this.updateStatus();};
         app.listeners.add(this.onChange);
         this.onSelection=()=>{const s=globalThis.getSelection?.();if(!s||s.isCollapsed||!s.rangeCount)return;const range=s.getRangeAt(0),node=range.commonAncestorContainer;const parent=node.nodeType===1?node:node.parentElement;const message=parent?.closest('.mes');if(!message||!parent.closest('.mes_text'))return;const floor=Number(message.getAttribute('mesid')),m=app.host.ctx().chat?.[floor];if(m&&!m.is_user)this.selection={quote:s.toString(),floor,chatKey:app.host.identity().chatKey};};
         document.addEventListener('pointerup',this.onSelection);
-        this.entry=el('details','','bbp-entry inline-drawer');const summary=el('summary','BBPresets · 世界与写作','inline-drawer-header');
+        this.entry=el('div','','bbp-entry inline-drawer');this.entry.id='bbpresets-entry';
+        const summary=el('button','','inline-drawer-toggle inline-drawer-header bbp-entry-toggle');summary.type='button';
+        summary.append(el('b','BBPresets · 世界与写作'),el('span','⌄','bbp-entry-arrow'));
+        this.entryContent=el('div','','inline-drawer-content bbp-entry-content');this.entryContent.id='bbpresets-entry-content';this.entryContent.hidden=true;
+        summary.setAttribute('aria-expanded','false');summary.setAttribute('aria-controls',this.entryContent.id);
+        // Own this click so ST's delegated slideToggle cannot toggle a second time.
+        summary.addEventListener('click',e=>{e.stopPropagation();this.entryContent.hidden=!this.entryContent.hidden;summary.setAttribute('aria-expanded',String(!this.entryContent.hidden));summary.lastChild.textContent=this.entryContent.hidden?'⌄':'⌃';});
         this.entryEnabled=check(false);this.entryEnabled.addEventListener('change',async()=>{this.entryEnabled.disabled=true;try{await app.saveSettings({...app.settings,enabled:this.entryEnabled.checked});app.notify(this.entryEnabled.checked?'BBPresets 已启用':'BBPresets 已停用','success');}catch(e){app.report(e);}finally{this.updateStatus();}});
-        this.entryStatus=el('p','','bbp-hint');this.entry.append(summary,field('启用 BBPresets',this.entryEnabled),this.entryStatus,this.button('打开作者侧栏',()=>this.open()),this.button('API 与维护设置',()=>{this.tab='settings';this.open();}));
+        this.entryStatus=el('p','','bbp-hint');this.entryStatus.setAttribute('role','status');
+        this.entryBall=check(this.ui.showBall);this.entryBall.addEventListener('change',()=>this.setBallVisible(this.entryBall.checked));
+        const shortcuts=el('div','','bbp-entry-pages');
+        for(const [id,label] of pages){const button=this.button(label,()=>this.open(id));button.dataset.tab=id;shortcuts.append(button);}
+        this.entryContent.append(field('启用 BBPresets',this.entryEnabled),field('显示悬浮球（本设备）',this.entryBall),this.button('重置悬浮球位置',()=>this.resetBall()),this.entryStatus,shortcuts);
+        this.entry.append(summary,this.entryContent);
         this.ball=el('button','✦','bbp-ball');this.ball.type='button';this.ball.setAttribute('aria-label','打开 BBPresets 作者侧栏');this.ball.setAttribute('aria-controls',this.dialog.id);this.ball.setAttribute('aria-expanded','false');this.ball.title='BBPresets · 点击展开，可拖动';
-        this.ball.addEventListener('click',()=>{if(this.dragged){this.dragged=false;return;}this.dialog.hidden?this.open():this.close();});document.body.append(this.ball);
-        this.ball.addEventListener('pointerdown',e=>{if(e.button!==0)return;const r=this.ball.getBoundingClientRect();this.drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};this.dragged=false;this.ball.setPointerCapture(e.pointerId);});
-        this.ball.addEventListener('pointermove',e=>{if(!this.drag)return;const dx=e.clientX-this.drag.x,dy=e.clientY-this.drag.y;if(Math.abs(dx)+Math.abs(dy)>6)this.dragged=true;if(!this.dragged)return;this.ball.style.right='auto';this.ball.style.left=Math.max(4,Math.min(innerWidth-52,this.drag.left+dx))+'px';this.ball.style.top=Math.max(4,Math.min(innerHeight-this.inputHeight-60,this.drag.top+dy))+'px';});
-        const release=()=>{this.drag=null;};this.ball.addEventListener('pointerup',release);this.ball.addEventListener('pointercancel',release);
-        this.onResize=()=>{this.inputHeight=Math.max(100,document.querySelector('#send_form')?.getBoundingClientRect().height??0);this.dialog.style.setProperty('--bbp-input-height',this.inputHeight+16+'px');if(this.ball.style.left){this.ball.style.left=Math.min(parseFloat(this.ball.style.left),Math.max(4,innerWidth-52))+'px';this.ball.style.top=Math.min(parseFloat(this.ball.style.top),Math.max(4,innerHeight-this.inputHeight-60))+'px';}};
+        const toggle=()=>this.dialog.hidden?this.open():this.close();
+        this.ball.addEventListener('click',e=>{if(e.detail!==0&&(this.dragged||this.pointerActivated)){this.dragged=false;this.pointerActivated=false;return;}toggle();});this.shadow.append(this.ball);
+        this.ball.addEventListener('pointerdown',e=>{if(e.button!==0)return;const r=this.ball.getBoundingClientRect();this.drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};this.dragged=false;this.pointerActivated=false;this.ball.setPointerCapture(e.pointerId);});
+        this.ball.addEventListener('pointermove',e=>{if(!this.drag)return;const dx=e.clientX-this.drag.x,dy=e.clientY-this.drag.y;if(Math.abs(dx)+Math.abs(dy)>6)this.dragged=true;if(!this.dragged)return;this.placeBall({left:this.drag.left+dx,top:this.drag.top+dy});});
+        const release=e=>{if(this.drag&&this.dragged){const r=this.ball.getBoundingClientRect();this.ui.left=r.left;this.ui.top=r.top;this.saveUI();}else if(this.drag&&e.type==='pointerup'&&e.pointerType==='touch'){/* Some mobile browsers omit click after pointer capture in a shadow tree. */this.pointerActivated=true;toggle();}this.drag=null;};this.ball.addEventListener('pointerup',release);this.ball.addEventListener('pointercancel',release);this.ball.addEventListener('lostpointercapture',release);
+        this.onResize=()=>this.layout();
         this.onKey=e=>{if(e.key==='Escape'&&!this.dialog.hidden)this.close();};document.addEventListener('keydown',this.onKey);globalThis.addEventListener('resize',this.onResize);
         this.resizeObserver=new ResizeObserver(this.onResize);this.resizeObserver.observe(document.body);const form=document.querySelector('#send_form');if(form)this.resizeObserver.observe(form);this.onResize();
+        globalThis.visualViewport?.addEventListener('resize',this.onResize);globalThis.visualViewport?.addEventListener('scroll',this.onResize);
         this.mount();this.observer=new MutationObserver(()=>this.mount());this.observer.observe(document.body,{childList:true,subtree:true});
         this.onChange();
+    }
+    saveUI(){try{localStorage.setItem(UI_KEY,JSON.stringify(this.ui));}catch{this.app.notify('界面已调整，但浏览器禁止保存本设备偏好；刷新后会恢复默认。','warning');}}
+    setBallVisible(show){this.ui.showBall=show;this.ball.hidden=!show;this.entryBall.checked=show;this.saveUI();this.layout();this.entryStatus.textContent=show?'悬浮球已显示':'悬浮球已关闭，以下功能入口仍可正常使用';}
+    resetBall(){delete this.ui.left;delete this.ui.top;this.setBallVisible(true);return '悬浮球已显示并回到默认位置';}
+    bounds(){const v=globalThis.visualViewport,left=v?.offsetLeft??0,top=v?.offsetTop??0;return {left:left+8,top:top+8,right:left+(v?.width??innerWidth)-8,bottom:top+(v?.height??innerHeight)-8};}
+    placeBall(position){const r=this.ball.getBoundingClientRect(),b=this.bounds(),form=document.querySelector('#send_form')?.getBoundingClientRect();if(form?.height&&form.top>b.top+64&&form.top<b.bottom)b.bottom=form.top-8;const p=clampPosition(position,b,{width:r.width||48,height:r.height||48});this.ball.style.left=p.left+'px';this.ball.style.top=p.top+'px';}
+    layout(){
+        const b=this.bounds(),form=document.querySelector('#send_form')?.getBoundingClientRect(),topbar=document.querySelector('#top-settings-holder')?.getBoundingClientRect();
+        const top=Math.max(b.top,topbar?.bottom??b.top+40);let bottom=b.bottom;
+        if(form?.height&&form.top>top+120&&form.top<bottom)bottom=form.top-8;
+        const width=Math.min(448,b.right-b.left),height=Math.max(80,bottom-top);
+        Object.assign(this.dialog.style,{left:(b.right-width)+'px',top:top+'px',width:width+'px',height:height+'px'});
+        this.placeBall({left:this.ui.left??b.right-48,top:this.ui.top??Math.max(b.top+48,(b.bottom-b.top)*.4+b.top)});
     }
     mount(){if(this.entry.isConnected)return;const target=document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');if(target)target.append(this.entry);}
     button(label,fn){const b=el('button',label,'menu_button');b.type='button';b.addEventListener('click',async()=>{if(b.disabled)return;b.disabled=true;this.message.textContent='正在处理…';try{const result=await fn();this.message.textContent=typeof result==='string'?result:'操作完成';}catch(e){this.message.textContent=e.message;this.app.report(e);}finally{b.disabled=false;}});return b;}
@@ -52,11 +87,11 @@ export class Workbench {
         const a=this.app,s=a.story?.data;const names={loading:'读取服务器中',saving:'正在保存',saved:'已保存到酒馆服务器',error:'保存未完成，请查看恢复区'};
         const activity=a.auxiliary?'准备问题 / 测试连接中':a.activeJob?'正在提取 '+floorLabel(a.activeJob.sources):s?.jobs.some(j=>j.state==='queued')?(a.foreground?'正文完成后继续维护':'维护已排队'):!s?'请选择故事以开始维护':!a.settings?.enabled?'插件已停用':a.settings.mode==='manual'?'手动模式':'等待下一条用户消息，提取上一完整轮';
         this.status.textContent=`${s?.title??'尚未选择故事'} · ${names[a.status]??a.status} · 调用 ${a.stats.calls} 次 / 成功 ${a.stats.success} / 失败 ${a.stats.failed} · 待办 ${s?.jobs.length??0} / 提案 ${s?.proposals.length??0} · ${activity}${a.lastInjection.omitted?' · 注入预算省略 '+a.lastInjection.omitted+' 条':''}${a.stats.materialOmitted?' · 维护预算省略 '+a.stats.materialOmitted+' 条':''}${a.error?' · '+a.error:''}`;
-        if(this.entryStatus)this.entryStatus.textContent=activity;
+        if(this.entryStatus)this.entryStatus.textContent=activity+(a.error?' · '+a.error:'');
         if(this.entryEnabled){this.entryEnabled.checked=Boolean(a.settings?.enabled);this.entryEnabled.disabled=!a.settings;}
-        if(this.ball){this.ball.dataset.busy=String(Boolean(a.running||a.auxiliary));this.ball.dataset.error=String(Boolean(a.error));this.ball.title='BBPresets · '+activity;}
+        if(this.ball){this.ball.hidden=!this.ui.showBall;this.ball.dataset.busy=String(Boolean(a.running||a.auxiliary));this.ball.dataset.error=String(Boolean(a.error));this.ball.title='BBPresets · '+activity;}
     }
-    open(){this.render();this.dialog.hidden=false;this.ball.setAttribute('aria-expanded','true');this.onResize();}
+    open(tab){if(tab){this.tab=tab;this.editor=null;}this.render();this.dialog.hidden=false;this.content.scrollTop=0;this.ball.setAttribute('aria-expanded','true');this.onResize();}
     close(){this.dialog.hidden=true;this.ball.setAttribute('aria-expanded','false');}
     render(){
         this.content.replaceChildren();this.updateStatus();for(const b of this.nav.children)b.setAttribute('aria-current',String(b.dataset.tab===this.tab));
@@ -129,6 +164,8 @@ export class Workbench {
     }
     settings(){
         const a=this.app,s=copy(a.settings),fields={};this.content.append(el('h2','维护设置'));
+        const showBall=check(this.ui.showBall);showBall.addEventListener('change',()=>this.setBallVisible(showBall.checked));
+        this.content.append(field('显示悬浮球（本设备，立即生效）',showBall),this.button('重置悬浮球位置',()=>{showBall.checked=true;return this.resetBall();}));
         const toggles=[['enabled','启用 BBPresets'],['reflectionEnabled','自动作者自我总结'],['memoryRead','允许读取已确认同故事的 BB-Memory'],['memoryFollow','跟随已映射的 BB-Memory 槽（默认关闭）']];
         for(const [key,label] of toggles){fields[key]=check(s[key]);this.content.append(field(label,fields[key]));}
         for(const [key,label,options] of [['mode','编辑权限',[['semi','半自动：小改直接记录，重要变更提案'],['auto','全自动：自动修改全部未保护资料'],['manual','全手动：只按按钮维护，变更先审阅']]],['timing','维护时机',[['background','发送时后台整理上一完整轮'],['before','先维护，再生成正文']]],['connection','模型连接',[['main','复用酒馆主连接（正文完成后排队）'],['custom','独立 OpenAI 兼容连接']]]]){fields[key]=select(options,s[key]);this.content.append(field(label,fields[key]));}
@@ -147,6 +184,6 @@ export class Workbench {
         if(a.profile){const scopes=[['profile','用户默认指南与设置'],...(a.story?[[a.story.data.id,'当前故事']]:[])],target=select(scopes,this.versionTarget??a.story?.data.id??'profile');if(!target.value)target.value='profile';target.addEventListener('change',()=>{this.versionTarget=target.value;this.render();});const id=target.value,versions=a.repo.index.documents[id]?.history??[],picker=select(versions.map((v,i)=>[String(i),`版本 ${v.revision} · ${when(v.at)}`]));this.content.append(field('恢复作用域',target),field('历史版本',picker),this.button('查看所选版本的作者资料',async()=>{assert(versions.length,'尚无历史版本');const epoch=a.epoch,version=await a.repo.loadVersion(id,versions[Number(picker.value)]);assert(epoch===a.epoch,'故事已切换，请重新查看版本');const card=el('section','','bbp-card');card.append(el('h3',`版本 ${version.revision} · 作者资料`));for(const r of version.data.records)card.append(el('h4',r.title),el('pre',body(r)));this.content.append(card);}),this.button('恢复所选版本',async()=>{assert(versions.length,'尚无历史版本');await a.restore(id,versions[Number(picker.value)]);this.render();}),el('p','恢复会新建版本，保留已有历史和点评；当前保留文字若与旧版本冲突，恢复将停止。','bbp-hint'));}
         this.content.append(this.button('检查本设备未完成保存',async()=>{const rows=await a.recovery.list();const list=el('section','','bbp-card');list.append(el('h3',`待恢复副本 ${Object.keys(rows).length} 份`));for(const [id,p] of Object.entries(rows)){const archive={format:'bbpresets-export',schema:1,documents:[p.data]};list.append(el('p',`${p.data.title} · ${when(p.at)}`),this.button('导出此恢复副本',()=>download(archive,`BBPresets-recovery-${id}.json`)),this.button('恢复为独立副本',async()=>{await a.importArchive(archive);this.render();}));}this.content.append(list);}));
     }
-    destroy(){this.observer.disconnect();this.resizeObserver.disconnect();globalThis.removeEventListener('resize',this.onResize);document.removeEventListener('keydown',this.onKey);document.removeEventListener('pointerup',this.onSelection);this.app.listeners.delete(this.onChange);this.dialog.remove();this.entry.remove();this.ball.remove();}
+    destroy(){this.destroyed=true;this.observer.disconnect();this.resizeObserver.disconnect();globalThis.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('scroll',this.onResize);document.removeEventListener('keydown',this.onKey);document.removeEventListener('pointerup',this.onSelection);this.app.listeners.delete(this.onChange);this.surface.remove();this.entry.remove();}
 }
 function floorLabel(sources){const floors=sources.map(s=>s.floor).filter(Number.isInteger);return floors.length?'第 '+[...new Set(floors)].join('、')+' 楼':'无聊天楼层';}
