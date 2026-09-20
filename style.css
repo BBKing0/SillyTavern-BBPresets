@@ -73,3 +73,6 @@
 .bbp-quick .bbp-status { white-space:pre-line; max-height:8rem; }
 .bbp-quick textarea { min-height:3.5rem; }
 @media(max-height:500px) { .bbp-quick .bbp-status { max-height:3rem; } }
+
+.bbp-small-actions button { font-size:.8em; min-height:2rem; padding:.3rem .45rem; margin:.15rem; }
+.bbp-feedback-composer .bbp-field { margin:.65rem 0; }

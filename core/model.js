@@ -4,6 +4,7 @@ import {validatePrompts} from './prompt-templates.js';
 import {sourcePrefixes} from './source-prefix.js';
 export const SCHEMA = 1;
 export const OUTLINE_KINDS = ['core','line','chapter','clue'];
+export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'world', 'guide', 'focus', 'experience'];
 export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
 export const copy = value => structuredClone(value);
@@ -33,8 +34,10 @@ export function validateRecord(r) {
     return r;
 }
 export function validateDocument(doc) {
-    assert(doc && doc.schema === SCHEMA && ['profile', 'story'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
-    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks']);
+    assert(doc && doc.schema === SCHEMA && ['profile', 'story','author'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
+    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId']);
+    assert(doc.activeAuthorId===undefined||doc.type==='profile'&&validId(doc.activeAuthorId),'当前作者身份无效');
+    if(doc.type==='author')assert(doc.records.every(r=>AUTHOR_KINDS.includes(r.kind)),'作者只能保存写作偏好与经验');
     assert(doc.authorVersion===undefined||doc.authorVersion===5,'作者资料版本不支持');
     if(doc.retiredTasks!==undefined)assert(Array.isArray(doc.retiredTasks)&&doc.retiredTasks.length<=6000,'旧任务记录无效');
     if(doc.initializationDrafts!==undefined){assert(Array.isArray(doc.initializationDrafts),'初始化草稿列表无效');const chats=new Set();for(const draft of doc.initializationDrafts){validateDraft(draft);assert(!chats.has(draft.chatKey),'初始化草稿聊天重复');chats.add(draft.chatKey);}}
