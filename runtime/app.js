@@ -1,13 +1,19 @@
-import {assert,copy,same,uid,hash,newDocument,applyChanges,invalidateSources,forkAt,restoreDocument,validateDocument,validateSettings,record} from '../core/model.js';
+import {assert,copy,same,uid,hash,newDocument,applyChanges,invalidateSources,forkAt,restoreDocument,validateDocument,validateSettings,record,migrateAuthor,OUTLINE_KINDS} from '../core/model.js';
 import {Repository} from '../core/repository.js';
-import {injection,maintenancePrompt,maintenanceMaterial,parseChanges,INITIALIZATION_TEMPLATE,parseQuestions} from './prompts.js';
+import {injection,maintenancePrompt,maintenanceMaterial,parseChanges,parseQuestions} from './prompts.js';
 import {newDraft,questionSet,draftAnswers,validateDraft} from '../core/initialization.js';
 import {retryRequest,transient} from './network.js';
+import {promptText,exportPrompts,importPrompts} from '../core/prompt-templates.js';
+import {responseText} from '../core/json.js';
+import {parseControl,stripControl} from '../core/outline.js';
+import {sourcePrefixes} from '../core/source-prefix.js';
+
+const outlineHash=doc=>hash(JSON.stringify(doc.records.filter(r=>OUTLINE_KINDS.includes(r.kind))));
 
 export class BBPresetsApp {
     constructor(host,{notify=()=>{},visible=()=>!globalThis.document?.hidden}={}) {
         this.host=host;this.notify=notify;this.visible=visible;this.epoch=0;this.story=null;this.profile=null;this.listeners=new Set();this.edits=Promise.resolve();this.running=null;this.controller=null;this.temporary='';this.error='';this.status='loading';this.lastInjection={text:'',omitted:0};this.stats={calls:0,success:0,failed:0,usage:null};this.ready=false;
-        this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';
+        this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';this.generation=null;this.controlTask=Promise.resolve();this.controlStatus='';this.waitingOutline=false;
     }
     changed(){for(const fn of this.listeners)fn();}
     report(error){this.error=error.message??String(error);this.notify(this.error,'error');this.changed();}
@@ -21,7 +27,8 @@ export class BBPresetsApp {
         // GENERATION_ENDED receives chat.length, not the generation type.
         const ended=()=>{this.host.foreground=false;setTimeout(()=>this.resumeQueue(),0);};
         this.host.on('GENERATION_ENDED',ended);
-        this.host.on('GENERATION_STOPPED',ended);
+        this.host.on('GENERATION_STOPPED',()=>{this.sendCancelled=true;this.generation=null;this.controller?.abort();this.auxController?.abort();this.waitResolve?.('cancel');ended();});
+        this.host.on('MESSAGE_RECEIVED',(floor,type)=>{if(type==='quiet'||type==='first_message')return;const generation=this.generation;this.controlTask=this.controlTask.then(()=>this.receiveControl(floor,generation)).catch(e=>{this.controlStatus=e.message;this.changed();});});
         for(const event of ['MESSAGE_SWIPED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_DELETED'])this.host.on(event,()=>{this.reconcile().catch(e=>this.report(e));});
         for(const event of ['MAIN_API_CHANGED','OAI_PRESET_CHANGED_AFTER','CHATCOMPLETION_MODEL_CHANGED','CONNECTION_PROFILE_LOADED'])this.host.on(event,()=>{this.controller?.abort();this.auxController?.abort();});
         await this.refresh();
@@ -30,7 +37,18 @@ export class BBPresetsApp {
         this.queueTimer=setInterval(()=>this.resumeQueue(),1000);this.queueTimer.unref?.();
     }
     get foreground(){return this.host.isForeground?.()??this.host.foreground;}
-    async resumeQueue(){if(!this.visible()||this.foreground||this.resumeTask||this.preparing||this.buildingInitialization)return;try{if(this.needsRefresh&&!this.running&&!this.auxiliary){await this.resume();return;}if(!this.ready)return;await this.host.flushSourceIds?.();if(this.story?.data.jobs.some(j=>j.state==='queued'))await this.drain();}catch(e){this.report(e);}}
+    async resumeQueue(){
+        if(!this.visible()||this.foreground||this.resumeTask||this.preparing||this.buildingInitialization)return;
+        try{
+            await this.controlTask;
+            // A send can begin while a separate question/API test owns the queue.
+            // Once it releases, resume the waiting revision without another user click.
+            if(this.waitingOutline){await this.drain({before:true,outlineOnly:true});if(!this.auxiliary&&this.story&&![...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='outline'))this.waitResolve?.('done');return;}
+            if(this.needsRefresh&&!this.running&&!this.auxiliary){await this.resume();return;}
+            if(!this.ready)return;
+            await this.host.flushSourceIds?.();await this.maybeSummarizeFeedback();if(this.story?.data.jobs.some(j=>j.state==='queued'))await this.drain();
+        }catch(e){this.report(e);}
+    }
     background(){this.needsRefresh=true;this.changed();}
     async resume(){
         if(!this.repo||!this.visible())return;
@@ -40,17 +58,19 @@ export class BBPresetsApp {
         try{await this.resumeTask;}finally{this.resumeTask=null;}
         await this.drain();
     }
-    suspend(){this.epoch++;this.ready=false;clearTimeout(this.draftTimer);this.controller?.abort();this.auxController?.abort();this.host.inject('');this.lastInjection={text:'',omitted:0};}
+    suspend(){this.epoch++;this.ready=false;this.generation=null;this.waitResolve?.('cancel');clearTimeout(this.draftTimer);this.controller?.abort();this.auxController?.abort();this.host.inject('');this.lastInjection={text:'',omitted:0};}
+    async upgrade(wrapper,epoch=this.epoch){if(!wrapper)return wrapper;const next=migrateAuthor(wrapper.data);return same(next,wrapper.data)?wrapper:this.repo.save(next,wrapper.revision,()=>this.epoch===epoch);}
     async refresh() {
         this.suspend();const epoch=this.epoch;await this.edits;await this.repo.refresh();
         let profile=await this.repo.load('profile');
         if(!profile)profile=await this.repo.save(newDocument('profile','用户写作指南','profile'),0,()=>this.epoch===epoch);
         if(epoch!==this.epoch)return;
-        this.profile=profile;this.story=null;
+        this.profile=await this.upgrade(profile,epoch);this.story=null;
+        this.host.controlFilter?.(this.settings.enabled);
         const chatKey=this.host.identity().chatKey, binding=this.host.ctx().chatMetadata?.bbpresetsBinding;
         this.selectedKey=chatKey;
         this.branchCandidate=binding&&binding.chatKey!==chatKey?copy(binding):null;
-        if(binding?.chatKey===chatKey && this.repo.index.documents[binding.storyId])this.story=await this.repo.load(binding.storyId);
+        if(binding?.chatKey===chatKey && this.repo.index.documents[binding.storyId])this.story=await this.upgrade(await this.repo.load(binding.storyId),epoch);
         if(epoch!==this.epoch)return;
         await this.loadDraft();if(epoch!==this.epoch)return;
         this.ready=true;this.error='';this.status='saved';
@@ -87,7 +107,7 @@ export class BBPresetsApp {
         this.suspend();const epoch=this.epoch,identity=this.host.identity();await this.edits;await this.repo.refresh();
         const selected=await this.repo.load(id);assert(selected?.data.type==='story','请选择故事存档');
         assert(epoch===this.epoch&&identity.chatKey===this.host.identity().chatKey,'选择期间聊天已变化');assert(identity.chatKey,'请先打开聊天');
-        this.story=selected;
+        this.story=await this.upgrade(selected,epoch);
         this.selectedKey=identity.chatKey;
         this.host.ctx().chatMetadata.bbpresetsBinding={storyId:id,chatKey:identity.chatKey};
         await this.host.ctx().saveMetadata();
@@ -106,79 +126,100 @@ export class BBPresetsApp {
     }
     async beforeGenerate(type='normal') {
         if(['quiet','impersonate'].includes(type))return;
+        this.sendCancelled=false;
         this.host.foreground=true;
         if(!this.ready||!this.settings?.enabled||!this.story||!this.visible()||this.selectedKey!==this.host.identity().chatKey){this.host.inject('');return;}
-        // Freeze before launching this send's maintenance. Never await a model in background mode.
         await this.followMemory();
         const epoch=this.epoch;
         if(!this.story||!this.ready)return;
-        const atSend=await this.host.capture();
-        const validStory=invalidateSources(copy(this.story.data),atSend.chatKey,atSend.sources);
-        const temporary=this.temporary;
-        const frozen=injection(copy(this.profile.data),validStory,this.settings,temporary);
-        this.temporary='';this.lastInjection=frozen;this.host.inject(frozen.text);this.changed();
-        const prepare=async()=>{
-            if(epoch!==this.epoch)return;
-            await this.reconcile();
-            if(['swipe','regenerate','continue'].includes(type)||this.settings.mode==='manual')return;
-            const context=atSend;
-            if(epoch!==this.epoch)return;
-            // Only a subsequent USER turn releases a completed exchange for extraction.
-            const lastUser=context.rows.findLast(r=>r.role==='user');
-            const eligible=context.pairs.filter(p=>p.rows.at(-1).floor<lastUser?.floor);
-            const done=new Set([...this.story.data.processed,...this.story.data.jobs.flatMap(j=>j.pairKeys??[j.key]),...this.story.data.proposals.flatMap(j=>j.pairKeys??[j.key])]);
-            const pending=eligible.filter(p=>!done.has('world:'+p.key));
-            if(pending.length>=this.settings.frequency) {
-                await this.queueJob('world',{context,pairs:pending,key:'world:'+pending.at(-1).key});
-            }
-            if(this.settings.reflectionEnabled && eligible.length && eligible.length%this.settings.reflectionFrequency===0) {
-                const key='reflection:'+eligible.at(-1).key;
-                if(!done.has(key))await this.queueJob('reflection',{context,pairs:eligible.slice(-this.settings.contextRounds),key});
-            }
-        };
-        if(this.settings.timing==='before'){
-            await prepare();if(epoch!==this.epoch)return;
-            // At the extension interceptor the normal network request has not started yet.
-            this.host.foreground=false;
+        await this.controlTask;
+        await this.reconcile();
+        let frozenStory=copy(this.story.data);
+        if(this.settings.waitOutline!==false&&[...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='outline')){
+            this.waitingOutline=true;this.waitMessage='正在修订大纲，完成后继续正文';this.changed();
             this.host.maintenanceBefore=true;
-            try{await this.drain({before:true});}catch(e){this.report(e);}finally{this.host.maintenanceBefore=false;this.host.foreground=true;}
-            if(epoch===this.epoch){this.lastInjection=injection(this.profile.data,this.story.data,this.settings,temporary);this.host.inject(this.lastInjection.text);}
-        } else prepare().then(()=>this.drain()).catch(e=>this.report(e));
+            try{
+                const choice=new Promise(resolve=>{this.waitResolve=resolve;});
+                const work=this.drain({before:true,outlineOnly:true}).then(()=>this.story?.data.jobs.some(j=>j.kind==='outline')||this.story?.data.proposals.some(p=>p.kind==='outline')?'pending':'done');
+                let result=await Promise.race([choice,work]);
+                if(result==='pending'){this.waitMessage='修订未应用，请查看任务原因或提案；可以沿用旧大纲继续';this.changed();result=await choice;}
+                assert(result!=='cancel'&&epoch===this.epoch,'已取消等待大纲，本次正文未发送');
+                if(result==='done')frozenStory=copy(this.story.data);
+                else if(this.host.rawPending){this.waitMessage='已选择沿用旧大纲，等待酒馆主连接释放';this.changed();await this.host.waitRaw?.();assert(!this.host.rawPending,'主连接仍被占用，请等当前请求结束后重试正文');}
+            }finally{this.waitResolve=null;this.waitingOutline=false;this.host.maintenanceBefore=false;this.host.foreground=true;this.changed();}
+        }
+        // Also serialize a user choosing not to wait for a revision with an already-running main call.
+        if(this.host.rawPending){this.requestState='等待酒馆主连接释放';this.changed();try{await this.host.waitRaw?.();assert(!this.host.rawPending,'酒馆主连接尚未释放，请稍后重发正文');}finally{this.requestState='';}}
+        assert(epoch===this.epoch&&!this.sendCancelled,'故事已切换或生成已停止，本次正文未发送');
+        const atSend=await this.host.capture();
+        const validStory=invalidateSources(frozenStory,atSend.chatKey,atSend.sources);
+        const temporary=this.temporary;
+        const token=uid(),frozen=injection(copy(this.profile.data),validStory,this.settings,temporary,atSend,token);
+        this.generation=frozen.visibleIds.length?{token,epoch,storyId:this.story.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash:await outlineHash(validStory),visibleIds:frozen.visibleIds}:null;
+        this.temporary='';this.lastInjection=frozen;this.host.inject(frozen.text);this.changed();
     }
-    async queueJob(kind,{context,pairs,key=uid(),feedback=[],note=''}={}) {
+    continueOldOutline(){assert(this.waitResolve,'当前没有等待中的正文');this.waitResolve('skip');return '本次正文将沿用等待前的大纲';}
+    async receiveControl(floor,generation=this.generation){
+        if(!generation||generation.epoch!==this.epoch||generation.storyId!==this.story?.data.id||!this.settings.enabled)return;
+        const context=await this.host.capture(),row=context.rows.find(r=>r.floor===Number(floor));
+        if(!row||row.role!=='assistant'||context.chatKey!==generation.chatKey)return;
+        const source=context.sources.find(s=>s.id===row.id),key='control:'+row.id+':'+row.hash;
+        this.currentSources=context.sources;
+        if(this.story.data.controls?.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return;
+        const now=new Map(context.sources.map(s=>[s.id,s.hash]));
+        assert(generation.sources.every(s=>s.id===row.id||now.get(s.id)===s.hash),'正文生成期间来源变化，控制信息未应用');
+        const control=parseControl(row.text,generation.token,new Set(generation.visibleIds));
+        const sources=context.sources.filter(s=>s.floor<=row.floor);
+        const receipt={id:uid(),token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter,nextIds:control.nextIds,at:Date.now()};
+        if(control.chapter)assert(control.chapter.lineIds.every(id=>this.story.data.records.some(r=>r.id===id&&r.kind==='line')),'章节引用必须是故事线');
+        // Prepare once before the atomic receipt + task commit; a failed preparation is retryable.
+        let job=null;
+        if(control.revise){const input=await this.initializationInput(context,'');job={id:uid(),kind:'outline',key,chatKey:context.chatKey,input,signal:control.revise,sources,anchor:source,feedback:[],at:Date.now(),attempts:0,state:this.settings.mode==='manual'?'held':'queued'};}
+        const latest=await this.host.capture(),latestHashes=new Map(latest.sources.map(s=>[s.id,s.hash]));
+        assert(latest.chatKey===context.chatKey&&sources.every(s=>latestHashes.get(s.id)===s.hash),'读取资料期间来源已变化，控制信息未应用');
+        await this.edit(this.story.data.id,async d=>{
+            assert(generation.epoch===this.epoch&&await outlineHash(d)===generation.baseHash,'正文期间大纲已变化，控制信息未应用；可重新规划');
+            d.controls??=[];if(d.controls.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return d;
+            d.controls.push(receipt);if(job){assert(d.jobs.length<60,'任务队列已满，控制信息未应用');d.jobs.push(job);}return d;
+        });
+        this.controlStatus=job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):'本轮章节与选条已保存，无额外模型请求';this.changed();
+    }
+    taskSettings(kind){return {...copy(this.settings),connection:['initialization','outline'].includes(kind)?'main':this.settings.connection};}
+    async queueJob(kind,{context,pairs,key=uid(),feedback=[],note='',signal=null}={}) {
         assert(this.story,'请先选择 BBPresets 存档');const epoch=this.epoch,storyId=this.story.data.id;context??=await this.host.capture();
         const selected=pairs??context.pairs.slice(-this.settings.contextRounds);
         const rows=selected.flatMap(p=>p.rows);
-        let input=rows.map(r=>`${r.role} ${r.name}:\n${r.text}`).join('\n\n');
-        if(kind==='initialization')input=await this.initializationInput(context,note||feedback[0]?.note||'');
+        let input=rows.map(r=>`${r.role} ${r.name}:\n${stripControl(r.text)}`).join('\n\n');
+        if(['initialization','outline'].includes(kind))input=await this.initializationInput(context,note||feedback[0]?.note||'');
         else if(this.settings.memoryRead){const memory=await this.confirmedMemory();if(memory)input+='\nBB-Memory 同故事只读资料：'+JSON.stringify(memory).slice(0,10000);}
-        if(kind==='initialization')assert(input.length<=this.settings.maxInputChars,'初始化内容超过当前维护材料预算；回答已保留，请在设置中提高预算后重试');
+        if(['initialization','outline'].includes(kind))assert(input.length<=this.settings.maxInputChars,'大纲材料超过当前维护材料预算；输入已保留，请在设置中提高预算后重试');
         else input=input.slice(-this.settings.maxInputChars);
-        const sources=kind==='initialization'?context.sources:selected.flatMap(p=>p.sources),anchor=sources.at(-1)??null;
-        const job={id:uid(),kind,key,chatKey:context.chatKey,input,sources,anchor,feedback:copy(feedback),at:Date.now(),attempts:0,state:'queued',...(kind==='world'?{pairKeys:selected.map(p=>'world:'+p.key)}:{})};
+        const sources=['initialization','outline'].includes(kind)?context.sources:selected.flatMap(p=>p.sources),anchor=sources.at(-1)??null;
+        const job={id:uid(),kind,key,chatKey:context.chatKey,input,sources,anchor,signal,feedback:copy(feedback),at:Date.now(),attempts:0,state:'queued',...(kind==='world'?{pairKeys:selected.map(p=>'world:'+p.key)}:{})};
         assert(epoch===this.epoch&&context.chatKey===this.host.identity().chatKey,'准备维护期间聊天已变化');
         await this.edit(storyId,d=>{assert(d.jobs.length<60,'维护待办已达 60 条，请先处理或导出');if(!d.processed.includes(key)&&!d.jobs.some(j=>j.key===key)&&!d.proposals.some(j=>j.key===key))d.jobs.push(job);return d;});
         return job;
     }
-    drain({before=false}={}) {
+    drain({before=false,outlineOnly=false}={}) {
         if(this.auxiliary||this.preparing||this.resumeTask)return Promise.resolve();
         if(this.running)return this.running;
         const run=async()=>{
             while(this.story&&this.ready&&this.visible()&&this.settings.enabled){
-                if(this.settings.connection==='main' && (this.host.rawPending||this.foreground&&!before))return;
-                const job=this.story.data.jobs.find(j=>j.state==='queued');if(!job)return;
+                const job=this.story.data.jobs.find(j=>j.state==='queued'&&(!outlineOnly||j.kind==='outline'));if(!job)return;
+                if(this.taskSettings(job.kind).connection==='main' && (this.host.rawPending||this.foreground&&!before))return;
                 await this.runJob(copy(job));
             }
         };
         this.running=run().finally(()=>{this.running=null;this.changed();});return this.running;
     }
     async runJob(job) {
-        const epoch=this.epoch,storyId=this.story.data.id,settings=copy(this.settings),baseHash=await hash(JSON.stringify(this.story.data.records));
+        const epoch=this.epoch,storyId=this.story.data.id,settings=this.taskSettings(job.kind),baseHash=await hash(JSON.stringify(this.story.data.records));
         this.controller=new AbortController();const controller=this.controller;
         this.activeJob=job;
         try{
+            this.requestState='准备材料';this.changed();
             const material=maintenanceMaterial(job,this.story.data,this.profile.data),prompt=maintenancePrompt(job,this.story.data,this.profile.data,material);
-            const promptHash=await hash(prompt);
+            const promptHash=await hash(JSON.stringify([promptText(settings,'system'),prompt,settings.connection,settings.model,settings.endpoint]));
             this.stats.materialOmitted=material.omitted;
             await this.edit(storyId,d=>{const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已失效');j.attempts++;return d;});
             this.changed();
@@ -188,6 +229,8 @@ export class BBPresetsApp {
             assert(epoch===this.epoch&&!controller.signal.aborted,'任务已取消');
             const cacheKey=`result:${storyId}:${job.id}`,cached=this.resultCache.get(cacheKey)??await this.readLocal(cacheKey);
             const result=cached?.baseHash===baseHash&&cached?.promptHash===promptHash&&cached?.chatKey===job.chatKey?cached.result:await this.request(prompt,settings,controller.signal);
+            this.requestState='解析与校验';this.changed();
+            await this.writeLocal(`diagnostic:${storyId}:${job.id}`,{text:responseText(result).slice(0,200000),at:Date.now(),kind:job.kind});
             assert(!controller.signal.aborted&&epoch===this.epoch,'维护结果已过期');
             const context=await this.host.capture();
             assert(context.chatKey===job.chatKey,'任务所属聊天已切换');
@@ -200,9 +243,10 @@ export class BBPresetsApp {
                 assert(await hash(JSON.stringify(d.records))===baseHash,'资料已被修改，请重试维护以合并最新资料');
                 const options={origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor,feedbackIds:job.feedback.map(f=>f.id).filter(Boolean)};
                 const candidate=applyChanges(d,changes,options); // Validate protection even in review mode.
+                if(job.kind==='initialization')assert(candidate.records.some(r=>r.kind==='core'&&r.status==='active')&&candidate.records.some(r=>r.kind==='line'&&r.status==='active'),'初始大纲需要故事核心和至少一条故事线，请检查提示词后重试');
                 const resultCopy={baseHash,promptHash,chatKey:job.chatKey,result};this.resultCache.set(cacheKey,resultCopy);await this.writeLocal(cacheKey,resultCopy);
                 const important=changes.some(c=>c.op==='remove'||c.record?.importance==='major'||d.records.find(r=>r.id===(c.id??c.record?.id))?.importance==='major') || job.kind==='feedback'||job.kind==='initialization';
-                let next;
+                let next;this.requestState='应用与保存';
                 if(changes.length && settings.mode!=='auto' && (settings.mode==='manual'||important)) {
                     next=d;next.proposals.push({...job,changes,baseHash,state:'review',completedAt:Date.now()});
                 } else next=candidate;
@@ -228,22 +272,24 @@ export class BBPresetsApp {
             else {next.processed.push(p.key);for(const f of next.feedback)if(p.feedback.some(x=>x.id===f.id))f.status='saved';}
             next.processed=[...new Set([...next.processed,...p.pairKeys??[]])];next.proposals=next.proposals.filter(x=>x.id!==id);return next;
         });
+        if(this.waitingOutline&&![...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='outline'))this.waitResolve?.(accept?'done':'skip');
     }
-    async manual(kind='world',note='') {
+    async manual(kind='outline',note='') {
         assert(this.settings?.enabled,'请先在设置中启用 BBPresets');
         assert(!this.auxiliary,'正在准备问题或测试连接，请稍后重试');
         assert(!this.foreground,'请等当前正文完成后再手动维护');
-        if(kind==='initialization')await this.queueJob(kind,{note});else await this.queueJob(kind);
+        await this.queueJob(kind,{note});
         await this.drain();
         return this.story?.data.jobs.some(j=>j.kind===kind&&j.state==='failed')?'维护未完成，输入已保留；请在维护页检查原因并重试':this.story?.data.jobs.some(j=>j.kind===kind)?'任务已排队，等待连接空闲':this.story?.data.proposals.some(p=>p.kind===kind)?'维护已完成，有提案待审阅':'维护已完成';
     }
     async initializationInput(context,note='') {
         assert(note.length+1000<this.settings.maxInputChars,'初始化回答超过当前维护材料预算；全文已保留，请提高设置中的预算后重试');
-        const budget=Math.max(500,Math.floor((this.settings.maxInputChars-note.length-1000)*.55)),seed=await this.host.seed(Math.floor(budget*.5));
-        const recent=context.rows.slice(-this.settings.contextRounds*2-1).map(r=>`${r.role} #${r.floor}: ${r.text}`).join('\n');
+        const budget=Math.max(500,Math.floor((this.settings.maxInputChars-note.length-1000)*.6)),seed=await this.host.seed(Math.floor(budget*.5));
+        const recent=context.rows.slice(-this.settings.contextRounds*2-1).map(r=>`${r.role} #${r.floor}: ${stripControl(r.text)}`).join('\n');
         let memory='未启用同故事记忆读取';
         if(this.settings.memoryRead)memory=JSON.stringify(await this.confirmedMemory()??'未确认对应存档，本次未读取记忆');
-        return `用户回答（示例不代表用户偏好）：${note}\n人设与世界书：${seed.slice(0,Math.floor(budget*.5))}\n近期对话：${recent.slice(-Math.floor(budget*.3))}\n同故事只读记忆：${memory.slice(0,Math.floor(budget*.2))}`;
+        const excerpt=(text,n)=>text.length<=n?text:text.slice(0,n)+'\n[该来源超出预算，本次仅提供节选]';
+        return JSON.stringify({answers:note,world:excerpt(seed,Math.floor(budget*.5)),recent:excerpt(recent,Math.floor(budget*.3)),memory:excerpt(memory,Math.floor(budget*.2))});
     }
     async auxiliaryRequest(prompt,settings=this.settings,options={},validate=result=>result) {
         assert(!this.running&&!this.auxiliary,'已有维护或连接请求，请完成后重试');
@@ -272,7 +318,7 @@ export class BBPresetsApp {
             this.ensureDraft();this.updateInitialization(d=>{d.request={mode,state:'pending'};});await this.flushDraft();
             const input=await this.initializationInput(context,draftAnswers(this.initialization));
             assert(epoch===this.epoch,'故事已切换，请重新生成问题');
-            const questions=await this.auxiliaryRequest(INITIALIZATION_TEMPLATE+`\n本次${mode==='append'?'补充追问：根据已有回答与新想法，询问尚未明确的内容，不重复已答问题。':'生成一组新问题，尊重已有回答。'}\n只读资料：\n`+input,this.settings,{},parseQuestions);
+            const questions=await this.auxiliaryRequest(promptText(this.settings,'questions',{mode:promptText(this.settings,mode==='append'?'appendQuestions':'replaceQuestions'),material:input}),this.settings,{},parseQuestions);
             const current=await this.host.capture(),hashes=new Map(current.sources.map(s=>[s.id,s.hash]));
             assert(epoch===this.epoch&&current.chatKey===context.chatKey&&context.sources.every(s=>hashes.get(s.id)===s.hash),'提问期间聊天内容已变化，已有回答仍保留，请重新生成问题');
             this.updateInitialization(d=>questionSet(d,questions,mode));await this.flushDraft();this.changed();return questions;
@@ -354,7 +400,7 @@ export class BBPresetsApp {
     }
     async testConnection(settings=this.settings,key=this.host.key) {
         validateSettings(settings);
-        const start=Date.now();await this.auxiliaryRequest('连接测试。不要读取或总结故事，只返回 {"ok":true}。',settings,{key},result=>{
+        const start=Date.now();await this.auxiliaryRequest(promptText(settings,'connectionTest'),settings,{key},result=>{
             const text=typeof result==='string'?result:result?.text;
             assert(typeof text==='string'&&text.trim(),'API 请求成功但没有返回文本，请检查模型名称及接口协议');return result;
         });
@@ -366,7 +412,14 @@ export class BBPresetsApp {
     }
     async addFeedback({quote,note='',polarity='neutral',source=null,status='saved'}) {
         assert(this.story,'请先选择存档');assert(quote.length>0&&quote.length<=50000,'请选择不超过 5 万字符的文字');
-        const id=uid();await this.edit(this.story.data.id,d=>{d.feedback.push({id,quote,note,polarity,source,status,at:Date.now()});return d;});return id;
+        const id=uid();await this.edit(this.story.data.id,d=>{d.feedback.push({id,quote,note,polarity,source,status,at:Date.now()});return d;});if(status==='queued')void this.maybeSummarizeFeedback().catch(e=>this.report(e));return id;
+    }
+    async maybeSummarizeFeedback(){
+        if(this.feedbackChecking||!this.ready||!this.story||!this.settings.enabled||this.settings.mode==='manual')return;
+        const reserved=new Set([...this.story.data.jobs,...this.story.data.proposals].flatMap(j=>j.feedback.map(f=>f.id)));
+        const items=this.story.data.feedback.filter(f=>f.status==='queued'&&!reserved.has(f.id));
+        if(items.length<(this.settings.feedbackThreshold??5))return;
+        this.feedbackChecking=true;try{await this.sendFeedback(items.map(f=>f.id));}finally{this.feedbackChecking=false;}
     }
     async sendFeedback(ids) {
         const pending=(this.feedbackSubmissions??Promise.resolve()).then(()=>this.submitFeedback(ids));
@@ -381,8 +434,11 @@ export class BBPresetsApp {
         await this.drain();
     }
     async withdrawFeedback(id){this.controller?.abort();await this.edit(this.story.data.id,d=>{const f=d.feedback.find(f=>f.id===id);assert(f,'点评不存在');f.status='withdrawn';d.jobs=d.jobs.filter(j=>!j.feedback.some(x=>x.id===id));d.proposals=d.proposals.filter(j=>!j.feedback.some(x=>x.id===id));const affected=d.history.filter(h=>h.feedbackIds?.includes(id)).flatMap(h=>h.changes.map(c=>c.id));d.excluded=[...new Set([...d.excluded,...affected])];d.conflicts.push({id:uid(),reason:'feedback-withdrawn',feedbackId:id,at:Date.now()});return d;});}
-    async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();if(!settings.enabled)this.host.inject('');}
-    async retryJobs(){assert(this.story,'请先选择当前存档');await this.edit(this.story.data.id,d=>{d.jobs.forEach(j=>{j.state='queued';delete j.error;delete j.retryable;});return d;});await this.drain();return this.story.data.jobs.some(j=>j.state==='failed')?'仍有失败任务，请查看维护页原因':this.story.data.jobs.length?'任务已排队':'维护队列已完成';}
+    async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.generation=null;this.host.controlFilter?.(settings.enabled);if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
+    async retryJobs(id=null){assert(this.story,'请先选择当前存档');assert(!this.running&&!this.auxiliary,'当前请求尚未结束，请稍后重试');if(!id&&!this.story.data.jobs.length&&this.initialization?.request?.state==='failed')return this.prepareInitialization(this.initialization.request.mode);assert(this.story.data.jobs.some(j=>!id||j.id===id),'没有可重试的任务；已生成的提案请查看并应用');await this.edit(this.story.data.id,d=>{d.jobs.filter(j=>!id||j.id===id).forEach(j=>{j.state='queued';delete j.error;delete j.retryable;});return d;});await this.drain();if(this.waitingOutline&&![...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='outline'))this.waitResolve?.('done');return this.story.data.jobs.some(j=>j.state==='failed')?'仍有失败任务，请查看任务原因和原始响应':this.story.data.jobs.length?(this.foreground?'任务已排队，正在等待正文结束':'任务已排队，正在等待连接空闲'):this.story.data.proposals.length?'结果已生成，等待应用提案':'任务已完成并应用';}
+    exportPromptSet(){return exportPrompts(this.settings);}
+    async importPromptSet(data){await this.saveSettings({...this.settings,prompts:importPrompts(data)},copy(this.settings));return '提示词已导入并保存到服务器';}
+    async diagnostic(id){return await this.readLocal(`diagnostic:${this.story.data.id}:${id}`);}
     cancelRequests(){this.controller?.abort();this.auxController?.abort();return '已停止当前请求；问答与未完成任务保留';}
     async bindMemory(){const m=await this.host.memorySnapshot();assert(m?.available,m?.reason??'未检测到可验证的 BB-Memory 当前存档');await this.edit(this.story.data.id,d=>{d.memoryBinding={signature:m.signature,character:m.character,slotName:m.slotName,stamp:m.stamp};return d;});}
     async confirmedMemory(){const m=await this.host.memorySnapshot();return m?.available&&m.signature===this.story?.data.memoryBinding?.signature?m.data:null;}

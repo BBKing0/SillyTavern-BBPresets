@@ -60,7 +60,7 @@
 .bbp-embedded .bbp-status { max-height:none; padding:.5rem 0; }
 .bbp-embedded nav { flex-wrap:wrap; padding:.3rem 0; overflow:visible; }
 .bbp-embedded nav button { flex:1 1 auto; margin:.1rem; font-size:.83em; }
-.bbp-embedded main { flex:initial; overflow:visible; padding:0 0 1rem; scrollbar-gutter:auto; }
+.bbp-embedded main { flex:initial; overflow:visible; padding:0 0 calc(1rem + var(--bbp-input-clearance,0px)); scrollbar-gutter:auto; }
 .bbp-embedded .bbp-message { padding:.3rem 0; }
 .bbp-embedded .bbp-card { margin:.6rem 0; padding:.6rem; }
 .bbp-text-section { margin:.5rem 0; }

@@ -7,7 +7,7 @@ import {loadStyle} from './ui/surface.js';
 let app,workbench,styleLink,destroyed=false,starting;
 globalThis.bbPresetsInterceptor=async(_chat,_contextSize,_abort,type)=>{
     if(!app||destroyed)return;
-    try{await app.beforeGenerate(type);}catch(e){app.host.inject('');app.report(e);}
+    try{app.host.filterPrompt(_chat);await app.beforeGenerate(type);}catch(e){_abort?.(true);app.host.inject('');app.report(e);}
 };
 export async function start(){
     if(starting)return starting;
