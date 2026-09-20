@@ -317,7 +317,7 @@ export class BBPresetsApp {
     }
     async auxiliaryRequest(prompt,settings=this.settings,options={},validate=result=>result) {
         assert(!this.running&&!this.auxiliary,'已有维护或连接请求，请完成后重试');
-        if(settings.connection==='main')assert(!this.foreground&&!this.host.rawPending,'酒馆主连接正在生成，请完成后重试');
+        if(settings.connection==='main')assert(!this.foreground&&!this.host.rawPending,this.host.mainBusyReason?.()||'酒馆主连接正在生成，请完成后重试');
         const controller=new AbortController(),epoch=this.epoch;
         this.auxController=controller;this.auxiliary=true;this.changed();
         try{const raw=await this.request(prompt,copy(settings),controller.signal,options);assert(!controller.signal.aborted&&epoch===this.epoch,'聊天或设置已变化，请重新操作');const result=validate(raw);this.stats.success++;return result;}
@@ -326,10 +326,10 @@ export class BBPresetsApp {
     }
     async request(prompt,settings,signal,options={}) {
         return retryRequest(async child=>{
-            // A timed-out generateRaw can still own ST's main connection. Never overlap it.
-            if(settings.connection==='main')assert(!this.host.rawPending&&!this.foreground,'酒馆主连接仍在处理请求；任务已保留，完成后可重试');
+            // Cancelling our wait can leave generateRaw running. Never overlap it.
+            if(settings.connection==='main')assert(!this.host.rawPending&&!this.foreground,this.host.mainBusyReason?.()||'酒馆主连接仍在处理请求；任务已保留，完成后可重试');
             this.stats.calls++;this.changed();return this.host.request(prompt,settings,child,options);
-        },{signal,timeoutSeconds:settings.timeoutSeconds,onState:state=>{this.requestState=state;this.changed();},...(this.retryOptions??{})});
+        },{signal,timeoutSeconds:settings.timeoutSeconds,onState:state=>{this.requestState=state;this.changed();},...(this.retryOptions??{}),abortOnTimeout:settings.connection!=='main'});
     }
     async prepareInitialization(mode='replace') {
         assert(this.story&&this.ready,'请先选择当前故事');
@@ -428,7 +428,7 @@ export class BBPresetsApp {
             const text=typeof result==='string'?result:result?.text;
             assert(typeof text==='string'&&text.trim(),'API 请求成功但没有返回文本，请检查模型名称及接口协议');return result;
         });
-        return `连接成功 · ${settings.model||'酒馆当前模型'} · ${((Date.now()-start)/1000).toFixed(1)} 秒 · 已收到文本响应`;
+        return `连接成功 · ${settings.connection==='main'?'酒馆当前主模型':settings.model} · ${((Date.now()-start)/1000).toFixed(1)} 秒 · 已收到文本响应`;
     }
     async saveRecord(target,r,expected=undefined) {
         const context=this.host.identity().chatKey?await this.host.capture():{sources:[]};

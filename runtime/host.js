@@ -23,6 +23,10 @@ export class TavernHost {
         if(typeof this.generationState==='function')return Boolean(this.generationState());
         return this.foreground || Boolean(this.ctx().streamingProcessor && !this.ctx().streamingProcessor.isFinished);
     }
+    mainBusyReason(){
+        if(this.rawPending)return `上一条 BBPresets 主 API 请求仍在等待酒馆返回${this.rawStartedAt?`（已等待 ${Math.max(0,Math.floor((Date.now()-this.rawStartedAt)/1000))} 秒）`:''}；结束后可重试。停止等待不会中止酒馆底层请求。`;
+        return this.isForeground()?'酒馆正文正在生成，请等正文结束后再初始化或维护':'';
+    }
     identity() {
         const c=this.ctx(), character=c.groupId != null && c.groupId !== '' ? `group:${c.groupId}` : c.characters?.[c.characterId]?.avatar ? `char:${c.characters[c.characterId].avatar}` : '';
         const chat=String(c.getCurrentChatId?.() ?? c.chatId ?? '');
@@ -122,12 +126,12 @@ export class TavernHost {
     async request(prompt,settings,signal,{key=this.key}={}) {
         const systemPrompt=promptText(settings,'system');
         if(settings.connection==='main') {
-            assert(!this.isForeground()&&!this.rawPending,'主连接正在生成，维护已保留，请稍后重试');
+            assert(!this.isForeground()&&!this.rawPending,this.mainBusyReason());
             assert(typeof this.ctx().generateRaw==='function','当前酒馆没有 generateRaw');
-            this.rawPending=true;
+            assert(!signal.aborted,'请求已取消');this.rawPending=true;this.rawStartedAt=Date.now();
             const pending=Promise.resolve().then(()=>this.ctx().generateRaw({systemPrompt,prompt}));
             this.rawCompletion=pending.catch(()=>{});
-            pending.finally(()=>{this.rawPending=false;}).catch(()=>{});
+            pending.finally(()=>{this.rawPending=false;this.rawStartedAt=null;}).catch(()=>{});
             // Do not call stopGeneration: it can stop the user's RP. Late results are ignored.
             try{return await abortable(pending,signal);}catch(error){if(!signal.aborted&&/abort|fetch|network|load failed/i.test(error.message))throw networkError('酒馆主连接暂时中断，正在保留任务以便重试');throw error;}
         }

@@ -27,14 +27,19 @@ export async function online(signal) {
         else if (globalThis.navigator?.onLine !== false) resume();
     });
 }
-export async function retryRequest(request, {signal, timeoutSeconds=90, retries=2, onState=()=>{}, wait=delay, waitOnline=online}={}) {
+export async function retryRequest(request, {signal, timeoutSeconds=90, retries=2, onState=()=>{}, wait=delay, waitOnline=online, abortOnTimeout=true}={}) {
     for (let attempt=0; ; attempt++) {
         if (signal?.aborted) throw new Error('请求已取消');
         onState(globalThis.navigator?.onLine===false?'网络已断开，等待恢复':'正在请求模型');
         await waitOnline(signal);
         const controller=new AbortController();let timedOut=false;
         const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
-        const timer=setTimeout(()=>{timedOut=true;controller.abort();},timeoutSeconds*1000);
+        const timer=setTimeout(()=>{
+            // generateRaw has no per-request abort signal. Keep receiving its result instead
+            // of abandoning it and retrying against a connection that is still occupied.
+            if(!abortOnTimeout){onState('响应较慢，仍在等待原请求；不会重复发送，可停止等待');return;}
+            timedOut=true;controller.abort();
+        },timeoutSeconds*1000);
         try {
             const result=await request(controller.signal,attempt);
             if(signal?.aborted)throw new Error('请求已取消');
