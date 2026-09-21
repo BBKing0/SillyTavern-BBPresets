@@ -64,7 +64,7 @@ export class BBPresetsApp {
         try{await this.resumeTask;}finally{this.resumeTask=null;}
         await this.drain();
     }
-    suspend(){this.epoch++;this.ready=false;this.generation=null;this.waitResolve?.('cancel');clearTimeout(this.draftTimer);this.controller?.abort();this.auxController?.abort();this.host.inject('');this.lastInjection={text:'',omitted:0};}
+    suspend(){this.epoch++;this.ready=false;this.generation=null;this.controlStatus='';this.waitResolve?.('cancel');clearTimeout(this.draftTimer);this.controller?.abort();this.auxController?.abort();this.host.inject('');this.lastInjection={text:'',omitted:0};}
     async upgrade(wrapper,epoch=this.epoch){if(!wrapper)return wrapper;const next=migrateAuthor(wrapper.data);return same(next,wrapper.data)?wrapper:this.repo.save(next,wrapper.revision,()=>this.epoch===epoch);}
     async refresh() {
         this.suspend();const epoch=this.epoch;await this.edits;await this.repo.refresh();
@@ -115,7 +115,7 @@ export class BBPresetsApp {
     async createAuthor(title,{from=null}={}){
         assert(this.ready&&title?.trim(),'请填写作者名称并等待资料加载完成');
         const epoch=this.epoch,data=newDocument('author',title.trim());
-        if(from){const source=await this.repo.load(from);assert(source,'来源资料不存在');const ids=new Set(source.data.records.filter(r=>AUTHOR_KINDS.includes(r.kind)).map(r=>r.id));data.records=copy(source.data.records.filter(r=>ids.has(r.id)));data.feedback=copy(source.data.feedback);data.history=copy(source.data.history.map(h=>({...h,changes:h.changes.filter(c=>ids.has(c.id))})).filter(h=>h.changes.length));data.excluded=source.data.excluded.filter(id=>ids.has(id));data.conflicts=copy(source.data.conflicts.filter(c=>ids.has(c.recordId)||c.feedbackId));}
+        if(from){const source=await this.repo.load(from);assert(source,'来源资料不存在');const ids=new Set(source.data.records.filter(r=>AUTHOR_KINDS.includes(r.kind)).map(r=>r.id));data.records=copy(source.data.records.filter(r=>ids.has(r.id)));data.feedback=copy(source.data.feedback.filter(f=>f.category!=='plot'));data.history=copy(source.data.history.map(h=>({...h,changes:h.changes.filter(c=>ids.has(c.id))})).filter(h=>h.changes.length));data.excluded=source.data.excluded.filter(id=>ids.has(id));data.conflicts=copy(source.data.conflicts.filter(c=>ids.has(c.recordId)||c.feedbackId));}
         await this.edits;await this.repo.save(data,0,()=>epoch===this.epoch);assert(epoch===this.epoch,'资料已切换，作者副本已保存');await this.selectAuthor(data.id);
     }
     async selectAuthor(id){
@@ -178,13 +178,14 @@ export class BBPresetsApp {
         const validStory=invalidateSources(frozenStory,atSend.chatKey,atSend.sources);
         const token=uid(),frozen=injection(copy(this.author.data),validStory,this.settings,atSend,token);
         this.generation=frozen.visibleIds.length?{token,epoch,storyId:this.story.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash:await outlineHash(validStory),visibleIds:frozen.visibleIds}:null;
-        this.lastInjection=frozen;this.host.inject(frozen.text);this.changed();
+        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?'已注入章节与下轮选条要求，等待本轮回复':this.story?'当前没有启用的大纲条目，未要求正文维护；请先建纲或启用条目':'当前未绑定大纲，未要求正文维护';this.changed();
     }
     continueOldOutline(){assert(this.waitResolve,'当前没有等待中的正文');this.waitResolve('skip');return '本次正文将沿用等待前的大纲';}
     async receiveControl(floor,generation=this.generation){
         if(!generation||generation.epoch!==this.epoch||generation.storyId!==this.story?.data.id||!this.settings.enabled)return;
         const context=await this.host.capture(),row=context.rows.find(r=>r.floor===Number(floor));
         if(!row||row.role!=='assistant'||context.chatKey!==generation.chatKey)return;
+        if(!row.text.includes('[BBP_CONTROL]')){this.controlStatus='本轮未返回控制块，大纲未更新；可在工具→注入预览检查指令，或在提示词页恢复尾部控制信息默认值';this.changed();return;}
         const source=context.sources.find(s=>s.id===row.id),key='control:'+row.id+':'+row.hash;
         this.currentSources=context.sources;
         if(this.story.data.controls?.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return;
@@ -204,10 +205,10 @@ export class BBPresetsApp {
             d.controls??=[];if(d.controls.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return d;
             d.controls.push(receipt);if(job){assert(d.jobs.length<60,'任务队列已满，控制信息未应用');d.jobs.push(job);}return d;
         });
-        this.controlStatus=job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):'本轮章节与选条已保存，无额外模型请求';this.changed();
+        this.controlStatus=job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):`本轮控制信息已保存：章节${control.chapter?'已更新':'沿用原状态'}，下轮选条 ${control.nextIds.length} 条；无额外模型请求`;this.changed();
     }
-    taskSettings(kind){return {...copy(this.settings),connection:['questions','initialization','outline'].includes(kind)?'main':this.settings.connection};}
-    async queueJob(kind,{context,pairs,key=uid(),feedback=[],note='',signal=null}={}) {
+    taskSettings(kind,job=null){return {...copy(this.settings),connection:(job?.connection&&(kind==='feedback'||kind==='outline'&&job.feedback?.some(f=>f.category==='plot'))?job.connection:null)??(['questions','initialization','outline'].includes(kind)?'main':this.settings.connection)};}
+    async queueJob(kind,{context,pairs,key=uid(),feedback=[],note='',signal=null,connection}={}) {
         const owner=kind==='feedback'?this.author:this.story;assert(owner,'请先选择资料存档');const epoch=this.epoch,storyId=owner.data.id;context??=kind==='feedback'?{chatKey:this.host.identity().chatKey,sources:[],pairs:[]}:await this.host.capture();
         const selected=pairs??context.pairs.slice(-this.settings.contextRounds);
         const rows=selected.flatMap(p=>p.rows);
@@ -217,9 +218,14 @@ export class BBPresetsApp {
         if(['initialization','outline'].includes(kind))assert(input.length<=this.settings.maxInputChars,'大纲材料超过当前维护材料预算；输入已保留，请在设置中提高预算后重试');
         else input=input.slice(-this.settings.maxInputChars);
         const sources=['initialization','outline'].includes(kind)?context.sources:selected.flatMap(p=>p.sources),anchor=sources.at(-1)??null;
-        const job={id:uid(),kind,key,chatKey:context.chatKey,input,sources,anchor,signal,feedback:copy(feedback),at:Date.now(),attempts:0,state:'queued',...(kind==='world'?{pairKeys:selected.map(p=>'world:'+p.key)}:{})};
+        const job={id:uid(),kind,key,...(connection?{connection}:{}),chatKey:context.chatKey,input,sources,anchor,signal,feedback:copy(feedback),at:Date.now(),attempts:0,state:'queued',...(kind==='world'?{pairKeys:selected.map(p=>'world:'+p.key)}:{})};
         assert(epoch===this.epoch&&context.chatKey===this.host.identity().chatKey,'准备维护期间聊天已变化');
-        await this.edit(storyId,d=>{assert(d.jobs.length<60,'维护待办已达 60 条，请先处理或导出');if(!d.processed.includes(key)&&!d.jobs.some(j=>j.key===key)&&!d.proposals.some(j=>j.key===key))d.jobs.push(job);return d;});
+        await this.edit(storyId,d=>{
+            assert(d.jobs.length<60,'维护待办已达 60 条，请先处理或导出');
+            if(d.processed.includes(key)||d.jobs.some(j=>j.key===key)||d.proposals.some(j=>j.key===key))return d;
+            for(const f of feedback)if(f.id){const current=d.feedback.find(x=>x.id===f.id);assert(current&&['saved','queued'].includes(current.status),'准备材料期间点评已撤回或处理，未发送');current.status='queued';}
+            d.jobs.push(job);return d;
+        });
         return job;
     }
     drain({before=false,outlineOnly=false}={}) {
@@ -228,7 +234,7 @@ export class BBPresetsApp {
         const run=async()=>{
             while(this.ready&&this.visible()&&this.settings.enabled){
                 const entry=this.jobs.find(({job})=>job.state==='queued'&&(!outlineOnly||job.kind==='outline'));if(!entry)return;const {job,target}=entry;
-                if(this.taskSettings(job.kind).connection==='main' && (this.host.rawPending||this.foreground&&!before))return;
+                if(this.taskSettings(job.kind,job).connection==='main' && (this.host.rawPending||this.foreground&&!before))return;
                 await this.runJob(copy(job),target);
             }
         };
@@ -236,7 +242,7 @@ export class BBPresetsApp {
     }
     async runJob(job,ownerId=this.story?.data.id) {
         const owner=this.documentFor(ownerId),authorTask=owner.data.type!=='story'&&job.kind==='feedback';
-        const epoch=this.epoch,storyId=ownerId,settings=this.taskSettings(job.kind),baseHash=await hash(JSON.stringify(owner.data.records));
+        const epoch=this.epoch,storyId=ownerId,settings=this.taskSettings(job.kind,job),baseHash=await hash(JSON.stringify(owner.data.records));
         this.controller=new AbortController();const controller=this.controller;
         this.activeJob={...job,ownerId};
         try{
@@ -435,33 +441,64 @@ export class BBPresetsApp {
         assert(this.documentFor(target)?.data.type==='story'||AUTHOR_KINDS.includes(r.kind),'个性化作者只能保存写作建议与经验');
         await this.edit(target,d=>{if(expected!==undefined)assert(same(d.records.find(x=>x.id===r.id)??null,expected),'条目已变化，输入仍保留；请重新打开最新条目后合并');return applyChanges(d,[{op:'put',record:r}],{actor:'user',anchor:context.sources.at(-1)??null});});
     }
-    async addFeedback({quote,note='',polarity='neutral',source=null,status='saved'}) {
-        assert(this.author,'请先选择存档');assert(quote.length>0&&quote.length<=50000,'请选择不超过 5 万字符的文字');
-        const id=uid();await this.edit(this.author.data.id,d=>{d.feedback.push({id,quote,note,polarity,source,status,at:Date.now()});return d;});if(status==='queued')void this.maybeSummarizeFeedback().catch(e=>this.report(e));return id;
+    feedbackConnection(category='writing'){return category==='plot'?(this.settings.plotConnection??'main'):this.settings.connection;}
+    async addFeedback({quote,note='',polarity='neutral',source=null,status='saved',category='writing',connection}) {
+        assert(['writing','plot'].includes(category),'请选择剧情或写作分类');
+        const owner=category==='plot'?this.story:this.author,chatKey=this.host.identity().chatKey;
+        assert(owner,category==='plot'?'请先为当前聊天绑定故事大纲':'请先选择作者');
+        assert(quote.length>0&&quote.length<=50000,'请选择不超过 5 万字符的文字');
+        assert(['positive','negative','neutral'].includes(polarity)&&['saved','queued'].includes(status),'点评选项无效');
+        if(category==='plot')assert(chatKey&&(!source||source.chatKey===chatKey),'剧情选段不属于当前聊天，请重新载入');
+        connection??=this.feedbackConnection(category);assert(['main','custom'].includes(connection),'点评连接无效');
+        const id=uid();await this.edit(owner.data.id,d=>{d.feedback.push({id,quote,note,polarity,source,status,category,connection,...(category==='plot'?{chatKey}:{}),at:Date.now()});return d;});
+        if(status==='queued')void this.maybeSummarizeFeedback().catch(e=>this.report(e));return id;
+    }
+    feedbackGroups(owner,ids=null){
+        const reserved=new Set([...owner.jobs,...owner.proposals].flatMap(j=>j.feedback.map(f=>f.id))),groups=new Map();
+        for(const f of owner.feedback){
+            if(reserved.has(f.id)||!['saved','queued'].includes(f.status)||ids&&!ids.includes(f.id)||!ids&&f.status!=='queued')continue;
+            if(owner.type==='story'&&(f.category!=='plot'||f.chatKey!==this.host.identity().chatKey))continue;
+            const connection=f.connection??this.feedbackConnection(f.category),key=(f.category??'writing')+':'+connection;
+            if(!groups.has(key))groups.set(key,{category:f.category??'writing',connection,items:[]});groups.get(key).items.push(f);
+        }
+        return [...groups.values()];
     }
     async maybeSummarizeFeedback(){
         if(this.feedbackChecking||!this.ready||!this.author||!this.settings.enabled||this.settings.mode==='manual')return;
-        const reserved=new Set([...this.author.data.jobs,...this.author.data.proposals].flatMap(j=>j.feedback.map(f=>f.id)));
-        const items=this.author.data.feedback.filter(f=>f.status==='queued'&&!reserved.has(f.id));
-        if(items.length<(this.settings.feedbackThreshold??5))return;
-        this.feedbackChecking=true;try{await this.sendFeedback(items.map(f=>f.id));}finally{this.feedbackChecking=false;}
+        this.feedbackChecking=true;
+        try{for(const scope of this.scopes)for(const group of this.feedbackGroups(scope.data))if(group.items.length>=(this.settings.feedbackThreshold??5))await this.sendFeedback(group.items.map(f=>f.id),scope.data.id);}
+        finally{this.feedbackChecking=false;}
     }
-    async sendFeedback(ids) {
-        const ownerId=this.author.data.id,epoch=this.epoch;
-        const pending=(this.feedbackSubmissions??Promise.resolve()).then(()=>{assert(epoch===this.epoch&&this.author.data.id===ownerId,'作者或聊天已切换，点评未提交到新作者');return this.submitFeedback(ids);});
+    async sendFeedback(ids,target=this.author.data.id) {
+        const epoch=this.epoch;
+        const pending=(this.feedbackSubmissions??Promise.resolve()).then(()=>{assert(epoch===this.epoch&&this.documentFor(target),'作者或聊天已切换，点评未提交到新存档');return this.submitFeedback(ids,target);});
         this.feedbackSubmissions=pending.catch(()=>{});return pending;
     }
-    async submitFeedback(ids) {
-        const ownerId=this.author.data.id,epoch=this.epoch;
-        const reserved=new Set([...this.author.data.jobs,...this.author.data.proposals].flatMap(j=>j.feedback.map(f=>f.id)));
-        const items=this.author.data.feedback.filter(f=>ids.includes(f.id)&&!reserved.has(f.id)&&['saved','queued'].includes(f.status));assert(items.length,'没有待发送点评，或选中点评已在维护/审阅队列中');
-        const key='feedback:'+uid();
-        await this.queueJob('feedback',{key,feedback:items});
-        assert(epoch===this.epoch&&this.author.data.id===ownerId,'作者已切换，点评任务保留在原作者');
-        await this.edit(ownerId,d=>{for(const f of d.feedback)if(items.some(x=>x.id===f.id))f.status='queued';return d;});
+    async submitFeedback(ids,target) {
+        const owner=this.documentFor(target),epoch=this.epoch,groups=this.feedbackGroups(owner.data,ids);
+        assert(groups.length,'没有待发送点评，或选中点评已在任务队列中；剧情点评需回到所属聊天发送');
+        for(const {category,connection,items} of groups){
+            assert(epoch===this.epoch,'资料已切换，已排队的点评保留在原存档');
+            if(category==='plot'){
+                const context=await this.host.capture(),hashes=new Map(context.sources.map(s=>[s.id,s.hash]));
+                const invalid=items.filter(f=>f.source&&hashes.get(f.source.id)!==f.source.hash);
+                if(invalid.length){await this.edit(target,d=>{for(const f of d.feedback)if(invalid.some(x=>x.id===f.id)){f.status='saved';f.sourceChanged=true;}return d;});throw Error('剧情点评原文已被编辑或删除，已转为只保存；请重新载入原文后提交');}
+                await this.queueJob('outline',{key:'plot-feedback:'+uid(),feedback:items,connection,context});
+            }else await this.queueJob('feedback',{key:'feedback:'+uid(),feedback:items,connection});
+        }
         await this.drain();
     }
-    async withdrawFeedback(id){this.controller?.abort();await this.edit(this.author.data.id,d=>{const f=d.feedback.find(f=>f.id===id);assert(f,'点评不存在');f.status='withdrawn';d.jobs=d.jobs.filter(j=>!j.feedback.some(x=>x.id===id));d.proposals=d.proposals.filter(j=>!j.feedback.some(x=>x.id===id));const affected=d.history.filter(h=>h.feedbackIds?.includes(id)).flatMap(h=>h.changes.map(c=>c.id));d.excluded=[...new Set([...d.excluded,...affected])];d.conflicts.push({id:uid(),reason:'feedback-withdrawn',feedbackId:id,at:Date.now()});return d;});}
+    async withdrawFeedback(id,target=this.author.data.id){
+        if(this.activeJob?.ownerId===target&&this.activeJob.feedback.some(f=>f.id===id))this.controller?.abort();
+        await this.edit(target,d=>{const f=d.feedback.find(f=>f.id===id);assert(f,'点评不存在');f.status='withdrawn';
+            const cancelled=[...d.jobs,...d.proposals].filter(j=>j.feedback.some(x=>x.id===id));
+            const release=new Set(cancelled.flatMap(j=>j.feedback.map(x=>x.id)));
+            for(const other of d.feedback)if(other.id!==id&&release.has(other.id)&&other.status==='queued')other.status='saved';
+            d.jobs=d.jobs.filter(j=>!j.feedback.some(x=>x.id===id));d.proposals=d.proposals.filter(j=>!j.feedback.some(x=>x.id===id));
+            const affected=d.history.filter(h=>h.feedbackIds?.includes(id)).flatMap(h=>h.changes.map(c=>c.id));d.excluded=[...new Set([...d.excluded,...affected])];d.conflicts.push({id:uid(),reason:'feedback-withdrawn',feedbackId:id,at:Date.now()});return d;
+        });
+        if(this.waitingOutline&&![...this.story.data.jobs,...this.story.data.proposals].some(j=>j.kind==='outline'))this.waitResolve?.('skip');
+    }
     async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.generation=null;this.host.controlFilter?.(settings.enabled);if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
     async retryJobs(id=null,target=null){
         assert(!this.running&&!this.auxiliary,'当前请求尚未结束，请稍后重试');

@@ -13,7 +13,7 @@ export async function start(){
     if(starting)return starting;
     starting=(async()=>{
         if(destroyed)return;
-        const style=loadStyle(document.head);styleLink=style.link;
+        const style=loadStyle(document.head,true);styleLink=style.link;
         await style.ready;
         if(destroyed)return;
         const host=new TavernHost();

@@ -1,4 +1,4 @@
-/* Floating UI lives in a ShadowRoot; these rules also style the host settings entry. */
+/* Private stylesheet: load only in BBPresets ShadowRoots, never the host document. */
 .bbp-entry,.bbp-dialog,.bbp-ball { --bbp-text:#e5e5e5; --bbp-bg:#262626; --bbp-border:var(--SmartThemeBorderColor,#666); --bbp-accent:var(--SmartThemeQuoteColor,#aaa); color:var(--bbp-text); box-sizing:border-box; font-family:var(--mainFontFamily,system-ui),sans-serif; font-size:var(--mainFontSize,15px); line-height:1.5; text-shadow:none; }
 /* Theme hue is retained, but alpha must never make the workspace transparent. */
 @supports (color:rgb(from white r g b / 1)) { .bbp-entry,.bbp-dialog,.bbp-ball { --bbp-text:rgb(from var(--SmartThemeBodyColor,#e5e5e5) r g b / 1); --bbp-bg:rgb(from var(--SmartThemeBlurTintColor,#262626) r g b / 1); } }
@@ -76,6 +76,12 @@
 
 .bbp-small-actions button { font-size:.8em; min-height:2rem; padding:.3rem .45rem; margin:.15rem; }
 .bbp-feedback-composer .bbp-field { margin:.65rem 0; }
+.bbp-feedback-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 .5rem; }
+.bbp-feedback-options > :first-child { grid-column:1/-1; }
+.bbp-quick .bbp-quick-feedback { border-top:0; padding-top:.3rem; }
+.bbp-quick .bbp-quick-feedback > summary { font-weight:600; }
+.bbp-quick .bbp-feedback-composer .bbp-field { margin:.4rem 0; }
+.bbp-quick .bbp-status { border-top:1px solid var(--bbp-border); border-bottom:0; font-size:.72em; }
 
 /* Navigation follows the current product: story, author, tasks, then tools. */
 .bbp-embedded nav.bbp-groups { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:.2rem; }

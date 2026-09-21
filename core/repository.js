@@ -1,4 +1,4 @@
-import { assert, copy, hash, same, uid, validId, validateDocument } from './model.js';
+import { assert, copy, hash, same, uid, validId, validateDocument, recordCounts } from './model.js';
 
 export const INDEX = 'bbpresets-index-v1.json';
 export const BACKUP = 'bbpresets-index-backup-v1.json';
@@ -74,7 +74,7 @@ export class Repository {
             assert(guard(), '发布前任务已失效');
             const next=copy(remote), old=remote.documents[data.id];
             next.revision++; next.commitId=uid();
-            next.documents[data.id]={file,revision,title:data.title,type:data.type,at:snapshot.at,history:[...(old?.history ?? []),...(old ? [{file:old.file,revision:old.revision,at:old.at}] : [])]};
+            next.documents[data.id]={file,revision,title:data.title,type:data.type,counts:recordCounts(data),at:snapshot.at,history:[...(old?.history ?? []),...(old ? [{file:old.file,revision:old.revision,at:old.at}] : [])]};
             await this.writeVerified(INDEX,next);
             this.index=next;
             await this.recovery.remove(pendingId);

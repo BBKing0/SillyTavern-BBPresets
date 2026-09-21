@@ -6,7 +6,12 @@ export const SCHEMA = 1;
 export const OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
+export function recordCounts(doc) {
+    const counts={outline:0,writing:0,reference:0,archived:0,total:doc.records.length};
+    for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
+    return counts;
+}
 export const copy = value => structuredClone(value);
 export const uid = () => {if(globalThis.crypto?.randomUUID)return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));return [...b].map(n=>n.toString(16).padStart(2,'0')).join('');};
 export const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -48,6 +53,11 @@ export function validateDocument(doc) {
     for (const key of ['history', 'feedback', 'proposals', 'processed', 'conflicts', 'excluded', 'jobs']) assert(Array.isArray(doc[key]), `缺少 ${key}`);
     assert(doc.feedback.length <= 5000 && doc.jobs.length <= 5000 && doc.proposals.length <= 1000, '资料数量超过单档上限，请导出归档');
     for (const f of doc.feedback) assert(validId(f.id) && text(f.quote, 50000) && text(f.note) && ['saved', 'queued', 'processed', 'withdrawn'].includes(f.status), '点评数据无效');
+    for (const f of doc.feedback) {
+        assert(f.category===undefined||['plot','writing'].includes(f.category),'点评分类无效');
+        assert(f.connection===undefined||['main','custom'].includes(f.connection),'点评连接无效');
+        assert(f.category!=='plot'||doc.type==='story'&&text(f.chatKey,500),'剧情点评必须属于故事和聊天');
+    }
     const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
     if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId),'控制记录格式无效');if(c.chapter)assert(text(c.chapter.title,160)&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'章节状态无效');}}
@@ -60,6 +70,7 @@ export function validateDocument(doc) {
         for(const c of h.changes){assert(c&&validId(c.id),'历史条目身份无效');for(const r of [c.before,c.after])if(r){validateRecord(r);assert(r.id===c.id,'历史条目归属不符');}}
     }
     for(const j of [...doc.jobs,...doc.proposals])assert(j&&validId(j.id)&&text(j.key,300)&&['world','feedback','reflection','initialization','outline'].includes(j.kind)&&text(j.chatKey,500)&&text(j.input,150000)&&Array.isArray(j.sources)&&j.sources.every(source)&&Array.isArray(j.feedback)&&j.feedback.every(f=>text(f.note)),'维护任务格式无效');
+    for(const j of [...doc.jobs,...doc.proposals])assert(j.connection===undefined||['main','custom'].includes(j.connection),'任务连接无效');
     if (doc.type === 'profile') validateSettings(doc.settings);
     assert(JSON.stringify(doc).length <= 4_000_000, '单档超过 400 万字符，请先导出并建立新档');
     return doc;
@@ -68,6 +79,7 @@ export function validateSettings(s) {
     assert(s && ['auto','semi','manual'].includes(s.mode) && ['background','before'].includes(s.timing) && ['main','custom'].includes(s.connection), '维护设置无效');
     keys(s,Object.keys(DEFAULTS));
     validatePrompts(s.prompts);
+    assert(s.plotConnection===undefined||['main','custom'].includes(s.plotConnection),'剧情点评连接无效');
     assert(s.feedbackThreshold===undefined||Number.isInteger(s.feedbackThreshold)&&s.feedbackThreshold>=1&&s.feedbackThreshold<=100,'点评总结阈值须为 1—100');
     assert(s.waitOutline===undefined||typeof s.waitOutline==='boolean','等待修订设置无效');
     for (const [k, min, max] of [['frequency',1,100],['reflectionFrequency',1,500],['contextRounds',1,30],['maxInputChars',2000,150000],['injectionChars',500,40000],['timeoutSeconds',10,300]]) assert(Number.isInteger(s[k]) && s[k] >= min && s[k] <= max, `${k} 超出范围 ${min}—${max}`);
@@ -202,6 +214,9 @@ export function forkAt(doc, {title, chatKey, sources, anchorIds, destinationChat
     const prefixes=sourcePrefixes(sources);
     next.controls=copy((doc.controls??[]).filter(c=>c.sources.every(s=>s.chatKey===chatKey&&allowed.has(s.id)&&hashes.get(s.id)===s.hash)&&(!c.prefixHash||prefixes.get(c.source.id)===c.prefixHash)));
     for(const c of next.controls){c.chatKey=destinationChatKey;c.source=remap(c.source);c.sources=c.sources.map(remap);}
+    // Inherit only feedback whose original passage belongs to the shared branch prefix.
+    next.feedback=copy(doc.feedback.filter(f=>f.category==='plot'&&f.chatKey===chatKey&&f.source&&allowed.has(f.source.id)&&hashes.get(f.source.id)===f.source.hash));
+    for(const f of next.feedback){f.chatKey=destinationChatKey;f.source=remap(f.source);if(f.status==='queued')f.status='saved';}
     next.excluded=doc.excluded.filter(id=>next.records.some(r=>r.id===id));
     next.conflicts=copy(doc.conflicts.filter(c=>next.excluded.includes(c.recordId)));
     return validateDocument(next);

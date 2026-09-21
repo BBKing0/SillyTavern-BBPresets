@@ -28,18 +28,23 @@ export function maintenanceMaterial(job,story,profile) {
     return data;
 }
 export function maintenancePrompt(job,story,profile,material=maintenanceMaterial(job,story,profile)) {
-    const key={world:'legacyWorld',reflection:'legacyReflection',feedback:'feedback',initialization:'initialization',outline:'outline'}[job.kind];
+    const key=job.kind==='outline'&&job.feedback?.some(f=>f.category==='plot')?'plotFeedback':{world:'legacyWorld',reflection:'legacyReflection',feedback:'feedback',initialization:'initialization',outline:'outline'}[job.kind];
     return promptText(profile.settings,key,{contract:promptText(profile.settings,'changeContract'),material:JSON.stringify(material)});
 }
 export function injection(profile,story,settings,context={sources:[],rows:[],chatKey:''},token='') {
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
     const selection=chooseOutline(story,context),selected=[],directory=[],used=[];
     const data={author:profile.title,chapter:selection.state.chapter,core:[],outlines:[],guidelines:[],directory,reference:[]};
-    const header=promptText(settings,'injection',{material:''}),control=token&&selection.active.length?promptText(settings,'control',{token}):'';
-    const budget=settings.injectionChars-header.length-control.length-80;
-    assert(JSON.stringify(data).length<=budget,'正文注入预算不足以包含当前要求和控制协议，请提高预算后重试');
+    const control=token&&selection.active.length?promptText(settings,'control',{token}):'';
+    // Escape markup delimiters in data so pasted quotes cannot close our wrappers.
+    const json=value=>JSON.stringify(value).replaceAll('<','\\u003c').replaceAll('>','\\u003e');
+    const parts=()=>({writer:`<BBPresets_WritingGuidelines>\n${json({author:data.author,guidelines:data.guidelines})}\n</BBPresets_WritingGuidelines>`,outline:`<BBPresets_Outline>\n${json({chapter:data.chapter,core:data.core,outlines:data.outlines,directory,reference:data.reference})}\n</BBPresets_Outline>`});
+    const render=()=>{const p=parts();return promptText(settings,'injection',{material:p.writer+'\n'+p.outline})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:'');};
+    const fits=()=>render().length<=settings.injectionChars;
+    const budget=settings.injectionChars-render().length;
+    assert(fits(),'正文注入预算不足以包含当前要求和控制协议，请提高预算后重试');
     let omitted=0;
-    const add=(target,value,required=false)=>{target.push(value);if(JSON.stringify(data).length>budget){target.pop();if(required)throw Error('故事核心超出正文注入预算，请提高预算后重试');omitted++;return false;}return true;};
+    const add=(target,value,required=false)=>{target.push(value);if(!fits()){target.pop();if(required)throw Error('故事核心超出正文注入预算，请提高预算后重试');omitted++;return false;}return true;};
     const view=r=>({id:r.id,title:r.title,truth:r.truth,text:r.blocks.map(b=>b.text).join(r.joiner??'\n\n')});
     for(const r of selection.records.filter(r=>r.kind==='core')){add(data.core,view(r),true);used.push(r.id);}
     const directoryBudget=Math.max(200,Math.floor(budget*.25));let dirChars=0;
@@ -49,6 +54,6 @@ export function injection(profile,story,settings,context={sources:[],rows:[],cha
     for(const r of selection.records.filter(r=>r.kind!=='core'))if(add(data.outlines,view(r)))used.push(r.id);
     for(const r of active(story).filter(r=>r.kind==='world'))add(data.reference,view(r));
     const visibleIds=[...new Set([...selected,...used.filter(id=>selection.active.some(r=>r.id===id))])];
-    return {text:promptText(settings,'injection',{material:JSON.stringify(data)})+(control?'\n'+control:''),omitted,visibleIds,recordIds:used,state:selection.state};
+    return {text:render(),omitted,visibleIds,recordIds:used,state:selection.state,controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;r.blocks.forEach(b=>delete b.locked);return r;}

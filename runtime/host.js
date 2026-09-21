@@ -36,7 +36,7 @@ export class TavernHost {
         const c=this.ctx(),event=(c.eventTypes ?? c.event_types)?.[name];if(!event)return;
         c.eventSource.on(event,fn);this.disposers.push(()=>c.eventSource.removeListener(event,fn));
     }
-    inject(content) { this.ctx().setExtensionPrompt?.('bbpresets_author',content,1,1,false,0); }
+    inject(content) { const ctx=this.ctx();assert(!content||typeof ctx.setExtensionPrompt==='function','当前酒馆缺少正文注入能力 setExtensionPrompt，请更新酒馆');ctx.setExtensionPrompt?.('bbpresets_author',content,1,0,false,0); }
     controlFilter(enabled){
         const settings=this.ctx().extensionSettings;if(!settings)return;
         const id='bbpresets-control-v1',others=(settings.regex??[]).filter(r=>r.id!==id);

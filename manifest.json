@@ -4,8 +4,8 @@
   "requires": [],
   "optional": [],
   "js": "index.js",
-  "css": "style.css",
+  "css": "entry.css",
   "author": "BBPresets",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "generate_interceptor": "bbPresetsInterceptor"
 }
