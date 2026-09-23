@@ -90,6 +90,9 @@
 .bbp-status-main { white-space:pre-line; line-height:1.65; }
 .bbp-dialog .bbp-status-details { padding:.25rem 0 0; margin-top:.3rem; border:0; }
 .bbp-status-details > div { padding-top:.4rem; }
+.bbp-dialog .bbp-recent { margin:.4rem 0; padding:.5rem 0; border-top:1px solid var(--bbp-border); font-size:.85rem; overflow-wrap:anywhere; }
+.bbp-recent > summary { line-height:1.6; }
+.bbp-recent p { margin:.4rem 0; font-size:inherit; line-height:1.6; }
 .bbp-steps { display:flex; gap:.5rem; list-style:none; padding:0; font-size:.8em; }
 .bbp-steps li { flex:1; border-bottom:2px solid var(--bbp-border); padding:.4rem 0; }
 .bbp-steps [aria-current=step] { border-color:var(--bbp-accent); font-weight:600; }

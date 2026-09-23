@@ -40,7 +40,8 @@ export function validateRecord(r) {
 }
 export function validateDocument(doc) {
     assert(doc && doc.schema === SCHEMA && ['profile', 'story','author'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
-    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId']);
+    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId','chatBindings','activity']);
+    if(doc.chatBindings!==undefined){assert(doc.type==='profile'&&Array.isArray(doc.chatBindings)&&doc.chatBindings.length<=5000,'聊天绑定列表无效');const chats=new Set();for(const b of doc.chatBindings){assert(b&&text(b.chatKey,500)&&b.chatKey&&validId(b.storyId)&&!chats.has(b.chatKey),'聊天绑定无效或重复');chats.add(b.chatKey);}}
     assert(doc.activeAuthorId===undefined||doc.type==='profile'&&validId(doc.activeAuthorId),'当前作者身份无效');
     if(doc.type==='author')assert(doc.records.every(r=>AUTHOR_KINDS.includes(r.kind)),'作者只能保存写作偏好与经验');
     assert(doc.authorVersion===undefined||doc.authorVersion===5,'作者资料版本不支持');
@@ -59,6 +60,7 @@ export function validateDocument(doc) {
         assert(f.category!=='plot'||doc.type==='story'&&text(f.chatKey,500),'剧情点评必须属于故事和聊天');
     }
     const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
+    if(doc.activity!==undefined){assert(doc.type==='story'&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
     if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId),'控制记录格式无效');if(c.chapter)assert(text(c.chapter.title,160)&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'章节状态无效');}}
     for(const f of doc.feedback)assert(!f.source||source(f.source),'点评来源无效');
@@ -214,6 +216,7 @@ export function forkAt(doc, {title, chatKey, sources, anchorIds, destinationChat
     const prefixes=sourcePrefixes(sources);
     next.controls=copy((doc.controls??[]).filter(c=>c.sources.every(s=>s.chatKey===chatKey&&allowed.has(s.id)&&hashes.get(s.id)===s.hash)&&(!c.prefixHash||prefixes.get(c.source.id)===c.prefixHash)));
     for(const c of next.controls){c.chatKey=destinationChatKey;c.source=remap(c.source);c.sources=c.sources.map(remap);}
+    next.activity=copy((doc.activity??[]).filter(a=>a.chatKey===chatKey&&hashes.get(a.source.id)===a.source.hash&&prefixes.get(a.source.id)===a.prefixHash)).map(a=>({...a,chatKey:destinationChatKey,source:remap(a.source)}));
     // Inherit only feedback whose original passage belongs to the shared branch prefix.
     next.feedback=copy(doc.feedback.filter(f=>f.category==='plot'&&f.chatKey===chatKey&&f.source&&allowed.has(f.source.id)&&hashes.get(f.source.id)===f.source.hash));
     for(const f of next.feedback){f.chatKey=destinationChatKey;f.source=remap(f.source);if(f.status==='queued')f.status='saved';}

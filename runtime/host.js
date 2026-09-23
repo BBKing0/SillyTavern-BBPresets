@@ -53,7 +53,8 @@ export class TavernHost {
         const c=this.ctx(),identity=this.identity();assert(identity.chatKey,'请先打开角色聊天');
         const chat=c.chat, seen=new Set(), rows=[];let dirty=false;
         for(let floor=0;floor<chat.length;floor++) {
-            const m=chat[floor];if(m.is_system || typeof m.mes!=='string')continue;
+            // BB-Memory hides extracted dialogue with is_system; hiding is not deletion.
+            const m=chat[floor];if((m.is_system && m._bbmem_hideSource!=='plugin') || typeof m.mes!=='string')continue;
             m.extra ??= {};
             let id=m.extra.bbpresetsSourceId;
             if(!validId(id)||seen.has(id)){id=uid();m.extra.bbpresetsSourceId=id;dirty=true;}

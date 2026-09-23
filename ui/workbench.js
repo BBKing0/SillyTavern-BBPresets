@@ -37,7 +37,7 @@ export class Workbench {
         const header=el('header');header.append(el('strong','个性化作者 · 多线大纲'));
         this.waitPanel=el('div','','bbp-card');this.waitLabel=el('p');this.waitPanel.append(this.waitLabel,this.button('沿用旧大纲继续',()=>app.continueOldOutline()),this.button('查看修订任务',()=>this.open('review')));this.waitPanel.hidden=true;
         this.status=el('div','','bbp-status');this.status.setAttribute('role','status');
-        this.statusMain=el('div','','bbp-status-main');const statusDetails=el('details','','bbp-status-details');this.statusMore=el('div');statusDetails.append(el('summary','运行详情'),this.statusMore);this.status.append(this.statusMain,statusDetails);
+        this.statusMain=el('div','','bbp-status-main');const statusDetails=el('details','','bbp-status-details');this.statusMore=el('div');statusDetails.append(el('summary','运行详情'),this.statusMore);this.recent=el('details','','bbp-recent');this.recentSummary=el('summary','最近状况');this.recentBody=el('div');this.recent.append(this.recentSummary,this.recentBody);this.status.append(this.statusMain,this.recent,statusDetails);
         this.message=el('div','','bbp-message');this.message.setAttribute('role','status');
         this.groupTabs={};this.groupNav=el('nav','','bbp-groups');this.groupNav.setAttribute('aria-label','功能分类');
         for(const [id,label,tabs] of groups){const b=this.button(label,()=>this.open(this.groupTabs[id]??tabs[0]));b.dataset.group=id;this.groupNav.append(b);}
@@ -53,7 +53,7 @@ export class Workbench {
         document.addEventListener('pointerup',this.onSelection);
         this.entry=el('div','','bbp-entry inline-drawer');this.entry.id='bbpresets-entry';
         const summary=el('div','','inline-drawer-toggle inline-drawer-header bbp-entry-toggle');summary.setAttribute('role','button');summary.tabIndex=0;this.summary=summary;
-        summary.append(el('b','BBPresets v0.5.3'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
+        summary.append(el('b','BBPresets v0.5.4'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
         this.entryContent=el('div','','inline-drawer-content bbp-entry-content');this.entryContent.id='bbpresets-entry-content';this.entryContent.hidden=true;
         summary.setAttribute('aria-expanded','false');summary.setAttribute('aria-controls',this.entryContent.id);
         // Own this click so ST's delegated slideToggle cannot toggle a second time.
@@ -70,7 +70,8 @@ export class Workbench {
         this.quick=el('aside','','bbp-dialog bbp-quick');this.quick.hidden=true;this.quick.id='bbpresets-quick';this.quick.setAttribute('aria-label','BBPresets 快捷操作');
         const quickHeader=el('header');quickHeader.append(el('strong','BBPresets'),this.button('收起快捷菜单',()=>this.close()));
         this.quickStatus=el('div','','bbp-status');this.quickMessage=el('div','','bbp-message');this.quickMessage.setAttribute('role','status');this.quickContent=el('main');
-        this.quick.append(quickHeader,this.quickMessage,this.quickContent,this.quickStatus);this.shadow.append(this.quick);this.quickActions();
+        this.quickRecent=el('details','','bbp-recent');this.quickRecentSummary=el('summary','最近状况');this.quickRecentBody=el('div');this.quickRecent.append(this.quickRecentSummary,this.quickRecentBody);this.quickRecent.addEventListener('toggle',()=>this.layout());
+        this.quick.append(quickHeader,this.quickMessage,this.quickContent);this.shadow.append(this.quick);this.quickActions();
         this.ball=el('button','✦','bbp-ball');this.ball.type='button';this.ball.setAttribute('aria-label','打开 BBPresets 快捷操作');this.ball.setAttribute('aria-controls',this.quick.id);this.ball.setAttribute('aria-expanded','false');this.ball.title='BBPresets · 点击展开，可拖动';
         const toggle=()=>{if(this.quick.hidden)this.quickActions();this.quick.hidden=!this.quick.hidden;this.ball.setAttribute('aria-expanded',String(!this.quick.hidden));this.layout();};
         this.ball.addEventListener('click',e=>{if(e.detail!==0&&(this.dragged||this.pointerActivated)){this.dragged=false;this.pointerActivated=false;return;}toggle();});this.shadow.append(this.ball);
@@ -90,7 +91,7 @@ export class Workbench {
         const section=el('details','','bbp-quick-feedback');section.open=this.ui.feedbackOpen;section.append(el('summary','划线评'));
         if(a.author)section.append(this.feedbackComposer(true));else section.append(el('p','正在读取作者资料…'));
         section.addEventListener('toggle',()=>{if(!section.isConnected)return;this.ui.feedbackOpen=section.open;this.saveUI();this.layout();});
-        c.append(section,this.button('快速保存',()=>a.saveCurrent()),this.button('查看大纲',()=>{this.open('records');this.close();}));
+        c.append(section,this.button('快速保存',()=>a.saveCurrent()),this.button('查看大纲',()=>{this.open('records');this.close();}),this.quickStatus,this.quickRecent);
     }
     feedbackComposer(quick=false){
         const a=this.app,key=a.author.data.id+':'+(a.story?.data.id??'')+':'+a.host.identity().chatKey;
@@ -107,7 +108,7 @@ export class Workbench {
         const use=async selected=>{const selection=selected?this.selection:null;assert(!selected||selection,'请先在聊天正文中划选，或直接粘贴原文');const c=await a.host.capture();assert(!selection||selection.chatKey===c.chatKey,'选段来自其他聊天，请重新选择');const row=selection?c.rows.find(r=>r.floor===selection.floor):c.rows.findLast(r=>r.role==='assistant');assert(row,'没有可载入的回复');assert(!selection||selection.raw===row.text,'选段所在回复已变化，请重新划选');quote.value=selection?.quote??stripControl(row.text);draft.quote=quote.value;draft.source=c.sources.find(s=>s.id===row.id);return '原文已载入，请在点评框填写意见';};
         const tools=el('div','','bbp-actions bbp-small-actions');tools.append(this.button('载入选中段落',()=>use(true)),this.button('载入最新回复',()=>use(false)),this.button('手动粘贴原文',()=>{quote.focus();return '请在原文框粘贴，点评写在下方';}));
         const options=el('div','','bbp-feedback-options');options.append(field('分类',category),field('态度',polarity),field('处理 API',connection));
-        box.append(options,destination,tools,field('原文（可粘贴）',quote),field('点评',note));
+        box.append(tools,field('原文（可粘贴）',quote),options,destination,field('点评',note));
         const save=async mode=>{
             assert(a.author.data.id+':'+(a.story?.data.id??'')+':'+a.host.identity().chatKey===key,'作者、故事或聊天已切换，请重新提交');
             const target=category.value==='plot'?a.story?.data.id:a.author.data.id;
@@ -152,7 +153,9 @@ export class Workbench {
         this.statusMain.textContent=`大纲：${s?.title??'未绑定'}\n作者：${a.author?.data.title??'尚未加载'}\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
         this.statusMore.textContent=`${landmarks} · 待办 ${a.jobs.length} / 提案 ${a.proposals.length}${draftState}${a.lastInjection.omitted?' · 注入预算省略 '+a.lastInjection.omitted+' 条':''}${a.controlStatus?' · '+a.controlStatus:''}${a.host.controlWarning?' · '+a.host.controlWarning:''}`;
         this.updateArchiveCounts();this.updateControlDetails();
-        if(this.quickStatus)this.quickStatus.textContent=`大纲：${s?.title??'未绑定'} · ${s?recordCounts(s).outline:0} 条\n作者：${a.author?.data.title??'尚未加载'} · 写作 ${a.author?recordCounts(a.author.data).writing:0} 条\n${names[a.status]??a.status}`;
+        if(this.quickStatus)this.quickStatus.textContent=`大纲：${s?.title??'未绑定'} · ${s?recordCounts(s).outline:0} 条\n作者：${a.author?.data.title??'尚未加载'} · 写作 ${a.author?recordCounts(a.author.data).writing:0} 条\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
+        const recent=a.recentStatus;
+        for(const [summary,body] of [[this.recentSummary,this.recentBody],[this.quickRecentSummary,this.quickRecentBody]])if(summary&&body){summary.textContent='最近状况 · '+recent[0];body.replaceChildren(...recent.slice(1).map(text=>el('p',text,'bbp-hint')));}
 
         if(this.entryStatus)this.entryStatus.textContent=activity+(a.error?' · '+a.error:'');
         if(this.entryEnabled){this.entryEnabled.checked=Boolean(a.settings?.enabled);this.entryEnabled.disabled=!a.settings;}
@@ -371,7 +374,7 @@ export class Workbench {
     prompts(){
         const a=this.app;this.content.append(el('h2','全部提示词'),el('p','逐条展开后可编辑并保存。{{material}} 等占位符会填入本次资料；编辑不会解除保护或格式校验。提示词随账户保存，导出仅含提示词。'));
         const file=input('','file');file.accept='.json,application/json';
-        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.3.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
+        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.4.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
         const promptGroups=[['通用规则',['system','changeContract']],['初始化与大纲',['questions','replaceQuestions','appendQuestions','initialization','outline']],['划线评与正文',['feedback','plotFeedback','injection','control']],['连接与历史兼容',['connectionTest','legacyWorld','legacyReflection']]];
         for(const [title,keys] of promptGroups){const group=el('section','','bbp-prompt-group');group.append(el('h3',title));this.content.append(group);
         for(const key of keys){const entry=PROMPTS[key];

@@ -54,6 +54,6 @@ export function injection(profile,story,settings,context={sources:[],rows:[],cha
     for(const r of selection.records.filter(r=>r.kind!=='core'))if(add(data.outlines,view(r)))used.push(r.id);
     for(const r of active(story).filter(r=>r.kind==='world'))add(data.reference,view(r));
     const visibleIds=[...new Set([...selected,...used.filter(id=>selection.active.some(r=>r.id===id))])];
-    return {text:render(),omitted,visibleIds,recordIds:used,state:selection.state,controlEnabled:Boolean(control)};
+    return {text:render(),omitted,visibleIds,recordIds:used,counts:{outline:data.core.length+data.outlines.length,writing:data.guidelines.length,directory:directory.length},state:selection.state,controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;r.blocks.forEach(b=>delete b.locked);return r;}
