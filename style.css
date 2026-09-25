@@ -84,7 +84,7 @@
 .bbp-quick .bbp-status { border-top:1px solid var(--bbp-border); border-bottom:0; font-size:.72em; }
 
 /* Navigation follows the current product: story, author, tasks, then tools. */
-.bbp-embedded nav.bbp-groups { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:.2rem; }
+.bbp-embedded nav.bbp-groups { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.2rem; }
 .bbp-embedded .bbp-groups button { margin:0; min-width:0; padding:.45rem .15rem; font-size:.9em; }
 .bbp-embedded nav.bbp-subnav { border-bottom:1px solid var(--bbp-border); padding-bottom:.5rem; }
 .bbp-status-main { white-space:pre-line; line-height:1.65; }

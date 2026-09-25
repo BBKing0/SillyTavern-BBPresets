@@ -6,7 +6,7 @@ export const SCHEMA = 1;
 export const OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
 export function recordCounts(doc) {
     const counts={outline:0,writing:0,reference:0,archived:0,total:doc.records.length};
     for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
@@ -62,7 +62,8 @@ export function validateDocument(doc) {
     const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
     if(doc.activity!==undefined){assert(doc.type==='story'&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
-    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId),'控制记录格式无效');if(c.chapter)assert(text(c.chapter.title,160)&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'章节状态无效');}}
+    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2].includes(a.controlVersion),'最近状况协议版本无效');
+    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
     for(const f of doc.feedback)assert(!f.source||source(f.source),'点评来源无效');
     assert(doc.processed.every(x=>text(x,300))&&doc.excluded.every(validId),'处理记录或排除列表无效');
     for(const h of doc.history){
@@ -84,6 +85,8 @@ export function validateSettings(s) {
     assert(s.plotConnection===undefined||['main','custom'].includes(s.plotConnection),'剧情点评连接无效');
     assert(s.feedbackThreshold===undefined||Number.isInteger(s.feedbackThreshold)&&s.feedbackThreshold>=1&&s.feedbackThreshold<=100,'点评总结阈值须为 1—100');
     assert(s.waitOutline===undefined||typeof s.waitOutline==='boolean','等待修订设置无效');
+    assert(s.outlineInjection===undefined||['requested','full'].includes(s.outlineInjection),'大纲注入方式无效');
+    for(const [k,min,max] of [['outlineMaxEntries',1,12],['outlineDirectoryChars',300,6000]])assert(s[k]===undefined||Number.isInteger(s[k])&&s[k]>=min&&s[k]<=max,`${k} 超出范围 ${min}—${max}`);
     for (const [k, min, max] of [['frequency',1,100],['reflectionFrequency',1,500],['contextRounds',1,30],['maxInputChars',2000,150000],['injectionChars',500,40000],['timeoutSeconds',10,300]]) assert(Number.isInteger(s[k]) && s[k] >= min && s[k] <= max, `${k} 超出范围 ${min}—${max}`);
     for (const k of ['enabled','reflectionEnabled','memoryRead','memoryFollow']) assert(typeof s[k] === 'boolean', `${k} 必须为开关`);
     assert(text(s.endpoint,2000) && text(s.model,300), '连接设置无效');

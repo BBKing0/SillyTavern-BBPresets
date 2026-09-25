@@ -33,9 +33,9 @@ export function maintenancePrompt(job,story,profile,material=maintenanceMaterial
 }
 export function injection(profile,story,settings,context={sources:[],rows:[],chatKey:''},token='') {
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
-    const selection=chooseOutline(story,context),selected=[],directory=[],used=[];
+    const selection=chooseOutline(story,context,settings),selected=[],directory=[],used=[];
     const data={author:profile.title,chapter:selection.state.chapter,core:[],outlines:[],guidelines:[],directory,reference:[]};
-    const control=token&&selection.active.length?promptText(settings,'control',{token}):'';
+    const control=token&&selection.active.length?promptText(settings,'control',{token,maxEntries:settings.outlineMaxEntries??3}):'';
     // Escape markup delimiters in data so pasted quotes cannot close our wrappers.
     const json=value=>JSON.stringify(value).replaceAll('<','\\u003c').replaceAll('>','\\u003e');
     const parts=()=>({writer:`<BBPresets_WritingGuidelines>\n${json({author:data.author,guidelines:data.guidelines})}\n</BBPresets_WritingGuidelines>`,outline:`<BBPresets_Outline>\n${json({chapter:data.chapter,core:data.core,outlines:data.outlines,directory,reference:data.reference})}\n</BBPresets_Outline>`});
@@ -43,17 +43,16 @@ export function injection(profile,story,settings,context={sources:[],rows:[],cha
     const fits=()=>render().length<=settings.injectionChars;
     const budget=settings.injectionChars-render().length;
     assert(fits(),'正文注入预算不足以包含当前要求和控制协议，请提高预算后重试');
-    let omitted=0;
-    const add=(target,value,required=false)=>{target.push(value);if(!fits()){target.pop();if(required)throw Error('故事核心超出正文注入预算，请提高预算后重试');omitted++;return false;}return true;};
+    let omitted=selection.limited;
+    const add=(target,value)=>{target.push(value);if(!fits()){target.pop();omitted++;return false;}return true;};
     const view=r=>({id:r.id,title:r.title,truth:r.truth,text:r.blocks.map(b=>b.text).join(r.joiner??'\n\n')});
-    for(const r of selection.records.filter(r=>r.kind==='core')){add(data.core,view(r),true);used.push(r.id);}
-    const directoryBudget=Math.max(200,Math.floor(budget*.25));let dirChars=0;
-    const directoryOrder=[...selection.records,...selection.active.filter(r=>!selection.records.includes(r))];
-    for(const r of directoryOrder){const entry={id:r.id,kind:r.kind,title:r.title,summary:r.summary??'',keywords:r.keywords??[]};const size=JSON.stringify(entry).length;if(dirChars+size>directoryBudget){omitted++;continue;}if(add(directory,entry)){dirChars+=size;selected.push(r.id);}}
     for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))if(add(data.guidelines,view(r)))used.push(r.id);
-    for(const r of selection.records.filter(r=>r.kind!=='core'))if(add(data.outlines,view(r)))used.push(r.id);
-    for(const r of active(story).filter(r=>r.kind==='world'))add(data.reference,view(r));
-    const visibleIds=[...new Set([...selected,...used.filter(id=>selection.active.some(r=>r.id===id))])];
+    for(const r of selection.records)if(add(r.kind==='core'?data.core:data.outlines,view(r)))used.push(r.id);
+    const directoryBudget=Math.min(settings.outlineDirectoryChars??1200,Math.max(0,Math.floor(budget*.25)));let dirChars=2;
+    for(const r of selection.directory){const entry={id:r.id,kind:r.kind,title:r.title.slice(0,80),summary:(r.summary??'').slice(0,80)};const size=json(entry).length+1;if(dirChars+size>directoryBudget){omitted++;continue;}if(add(directory,entry)){dirChars+=size;selected.push(r.id);}}
+    // Legacy world records remain stored, but are not silently injected in on-demand mode.
+    if(settings.outlineInjection==='full')for(const r of active(story).filter(r=>r.kind==='world'))if(add(data.reference,view(r)))used.push(r.id);
+    const visibleIds=[...new Set([...selected,...(data.chapter?.lineIds??[]),...used.filter(id=>selection.active.some(r=>r.id===id))])];
     return {text:render(),omitted,visibleIds,recordIds:used,counts:{outline:data.core.length+data.outlines.length,writing:data.guidelines.length,directory:directory.length},state:selection.state,controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;r.blocks.forEach(b=>delete b.locked);return r;}

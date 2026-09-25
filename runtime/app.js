@@ -240,7 +240,7 @@ export class BBPresetsApp {
         assert(epoch===this.epoch&&!this.sendCancelled,'准备注入期间聊天已变化');
         this.currentSources=atSend.sources;
         this.generation=this.story?{token,epoch,storyId:this.story.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,visibleIds:frozen.visibleIds,counts:frozen.counts,controlEnabled:frozen.controlEnabled}:null;
-        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?'已注入章节与下轮选条要求，等待本轮回复':this.story?'当前没有启用的大纲条目，未要求正文维护；请先建纲或启用条目':'当前未绑定大纲，未要求正文维护';this.changed();
+        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入剧情目标协议；本轮大纲正文 ${frozen.counts.outline} 条，等待回复`:this.story?'当前没有启用的大纲条目，未要求正文维护；请先建纲或启用条目':'当前未绑定大纲，未要求正文维护';this.changed();
     }
     continueOldOutline(){assert(this.waitResolve,'当前没有等待中的正文');this.waitResolve('skip');return '本次正文将沿用等待前的大纲';}
     async receiveControl(floor,generation=this.generation){
@@ -259,9 +259,9 @@ export class BBPresetsApp {
         const now=new Map(context.sources.map(s=>[s.id,s.hash]));
         assert(generation.sources.every(s=>s.id===row.id||now.get(s.id)===s.hash),'正文生成期间来源变化，控制信息未应用');
         const control=parseControl(row.text,generation.token,new Set(generation.visibleIds));
-        activity.status='applied';activity.titleChanged=Boolean(control.chapter&&control.chapter.title!==previous?.title);activity.chapterChanged=Boolean(control.chapter&&!same(control.chapter,previous));activity.revisionRequested=Boolean(control.revise);
+        activity.status='applied';activity.controlVersion=control.version;activity.chapterChanged=Boolean(control.version===2&&control.chapter&&!same(control.chapter,previous));activity.revisionRequested=Boolean(control.revise);
         const sources=context.sources.filter(s=>s.floor<=row.floor);
-        const receipt={id:uid(),token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter,nextIds:control.nextIds,at:Date.now()};
+        const receipt={id:uid(),version:control.version,token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter,nextIds:control.nextIds,at:Date.now()};
         if(control.chapter)assert(control.chapter.lineIds.every(id=>this.story.data.records.some(r=>r.id===id&&r.kind==='line')),'章节引用必须是故事线');
         // Prepare once before the atomic receipt + task commit; a failed preparation is retryable.
         let job=null;
@@ -273,7 +273,7 @@ export class BBPresetsApp {
             d.controls??=[];if(d.controls.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return d;
             d.controls.push(receipt);if(job){assert(d.jobs.length<60,'任务队列已满，控制信息未应用');d.jobs.push(job);}return saveActivity(d);
         });
-        this.controlStatus=job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):`本轮控制信息已保存：章节${control.chapter?'已更新':'沿用原状态'}，下轮选条 ${control.nextIds.length} 条；无额外模型请求`;this.changed();
+        this.controlStatus=control.version===1?'已保存旧版控制记录；旧摘要不作为剧情目标。请在工具→提示词更新尾部控制信息为 v2 协议':job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):`本轮控制信息已保存：剧情目标${activity.chapterChanged?'已更新':'沿用'}，下轮申请 ${control.nextIds.length} 条${this.settings.outlineInjection==='full'?'（当前为完整注入模式）':`（最多调用 ${this.settings.outlineMaxEntries??3} 条）`}；无额外模型请求`;this.changed();
         }catch(error){
             if(guard()){activity.status='invalid';activity.titleChanged=false;activity.chapterChanged=false;activity.revisionRequested=false;await this.edit(generation.storyId,saveActivity,{guard}).catch(()=>{});}
             throw error;
@@ -285,12 +285,12 @@ export class BBPresetsApp {
         const updates=(this.story?.data.history??[]).filter(h=>['outline','initialization'].includes(h.origin)&&h.changes.length&&h.sources?.length&&h.sources.every(s=>s.chatKey===chatKey&&hashes.get(s.id)===s.hash));
         const counts=this.lastInjection.counts??recent.at(-1);
         const lines=[counts?`最近正文注入：大纲 ${counts.outline} 条 · 写作 ${counts.writing} 条（目录 ${counts.directory} 条）`:'尚无正文调用记录'];
-        if(recent.length)lines.push(`最近 ${recent.length} 轮：标题更新 ${recent.filter(a=>a.titleChanged).length} 次 · 章节/进度更新 ${recent.filter(a=>a.chapterChanged).length} 次`);
+        if(recent.length)lines.push(`最近 ${recent.length} 轮：剧情目标更新 ${recent.filter(a=>a.controlVersion===2&&a.chapterChanged).length} 次`);
         const lastUpdate=updates.at(-1);lines.push(lastUpdate?`最近大纲修订：已保存 ${lastUpdate.changes.length} 项变更`:'大纲修订：尚无已应用的 AI 变更');
         for(const a of [...recent].reverse()){
             const floor=sources.find(s=>s.id===a.source.id)?.floor;
             const revision=updates.some(h=>(h.anchor??h.sources.at(-1))?.id===a.source.id)?' · 已改纲':a.revisionRequested?' · 已请求改纲，进度见任务':'';
-            lines.push(`#${floor??'?'} 楼 · ${a.status==='not-requested'?'尚无启用的大纲，未要求更新':a.status==='missing'?'未返回控制块':a.status==='invalid'?'控制未通过校验':`标题${a.titleChanged?'已更新':'沿用'} · 章节${a.chapterChanged?'已更新':'沿用'}`}${revision}`);
+            lines.push(`#${floor??'?'} 楼 · ${a.status==='not-requested'?'尚无启用的大纲，未要求更新':a.status==='missing'?'未返回控制块':a.status==='invalid'?'控制未通过校验':a.controlVersion!==2?'旧版章节记录':`剧情目标${a.chapterChanged?'已更新':'沿用'}`}${revision}`);
         }
         lines.push(`本次打开：API 请求 ${this.stats.calls} 次 · 任务成功 ${this.stats.success} / 失败 ${this.stats.failed}`);
         return lines;
@@ -506,7 +506,7 @@ export class BBPresetsApp {
         await this.flushDraft();await this.edits;
         assert(epoch===this.epoch&&id===this.story?.data.id,'故事已切换，请在当前故事重新保存');
         await this.edit(id,d=>{d.manualSavedAt=Math.max(Date.now(),(d.manualSavedAt??0)+1);return d;});
-        return '当前存档已保存到酒馆服务器；可在“恢复 / 导出”查看版本';
+        return '当前存档已保存到酒馆服务器；可在“工具 → 版本恢复”查看版本';
     }
     get progress(){
         const d=this.story?.data;if(!d)return {floor:null,reflectionAt:null};
