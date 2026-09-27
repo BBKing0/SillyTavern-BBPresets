@@ -9,6 +9,7 @@ function validateIndex(index) {
     for (const [id, d] of Object.entries(index.documents)) {
         assert(validId(id) && allowedFile(d.file) && Number.isInteger(d.revision) && Array.isArray(d.history), '服务器文档索引无效');
         for (const h of d.history) assert(allowedFile(h.file) && Number.isInteger(h.revision), '历史版本路径无效');
+        if(d.saved)assert(allowedFile(d.saved.file)&&Number.isInteger(d.saved.revision)&&Number.isFinite(d.saved.at),'手动保存点无效');
     }
     return index;
 }
@@ -75,6 +76,11 @@ export class Repository {
             const next=copy(remote), old=remote.documents[data.id];
             next.revision++; next.commitId=uid();
             next.documents[data.id]={file,revision,title:data.title,type:data.type,counts:recordCounts(data),at:snapshot.at,history:[...(old?.history ?? []),...(old ? [{file:old.file,revision:old.revision,at:old.at}] : [])]};
+            // Auto-saves advance the working version, never the user's explicit save point.
+            const previousManualAt=data.manualSavedAt&&old&&old.manualSavedAt===undefined?(await this.loadVersion(data.id,old)).data.manualSavedAt:old?.manualSavedAt;
+            const saved=data.manualSavedAt&&data.manualSavedAt!==previousManualAt?{file,revision,at:snapshot.at}:old?.saved;
+            if(saved)next.documents[data.id].saved=copy(saved);
+            if(data.manualSavedAt)next.documents[data.id].manualSavedAt=data.manualSavedAt;
             await this.writeVerified(INDEX,next);
             this.index=next;
             await this.recovery.remove(pendingId);

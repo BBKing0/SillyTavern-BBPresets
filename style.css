@@ -98,3 +98,6 @@
 .bbp-steps [aria-current=step] { border-color:var(--bbp-accent); font-weight:600; }
 .bbp-card > :first-child { margin-top:0; }
 .bbp-dialog .bbp-primary { border-color:var(--bbp-accent); background:color-mix(in srgb,var(--bbp-accent) 12%,var(--bbp-bg)); }
+.bbp-archive-counts { height:clamp(12rem,42dvh,26rem); max-height:26rem; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; border:1px solid var(--bbp-border); border-radius:.5rem; padding:.4rem; }
+.bbp-archive-counts .bbp-card { margin:.3rem 0; }
+@media(max-width:600px) { .bbp-archive-counts { height:clamp(10rem,36dvh,20rem); } }

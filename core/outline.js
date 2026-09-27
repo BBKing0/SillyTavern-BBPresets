@@ -1,19 +1,21 @@
 import {assert,validId,OUTLINE_KINDS} from './model.js';
 import {parseModelJSON} from './json.js';
 import {sourcePrefixes} from './source-prefix.js';
+import {validateStoryControl} from './story.js';
 
 export const CONTROL_OPEN='[BBP_CONTROL]';
 export const CONTROL_CLOSE='[/BBP_CONTROL]';
 // Ephemeral rendering/prompt filtering only: original chat content remains intact.
 export const CONTROL_FILTER='/\\[BBP_CONTROL\\][\\s\\S]*?(?:\\[\\/BBP_CONTROL\\]|$)/g';
 export function stripControl(text){return String(text??'').replace(/\[BBP_CONTROL\][\s\S]*?(?:\[\/BBP_CONTROL\]|$)/g,'').trimEnd();}
-export function parseControl(text,token,visibleIds) {
+export function parseControl(text,token,visibleIds,storyVisibility={}) {
     const parts=[...String(text).matchAll(/\[BBP_CONTROL\]([\s\S]*?)\[\/BBP_CONTROL\]/g)];
     // Continue appends to the stored message: older, already-consumed blocks may precede this one.
     const matching=parts.filter(part=>{try{return parseModelJSON(part[1]).token===token;}catch{return false;}});
     assert(matching.length===1,'本轮未返回完整且唯一的控制信息，大纲保持不变');
     const match=matching[0];assert(!text.slice(match.index+match[0].length).trim(),'控制信息必须位于正文末尾');
     const data=parseModelJSON(match[1],'正文控制信息');
+    if(data.version===3){assert(data.token===token,'控制信息本轮标识不符');return validateStoryControl(data,{...storyVisibility,visibleIds});}
     const only=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(k=>keys.includes(k));
     assert(only(data,['version','token','chapter','nextIds','revise'])&&[1,2].includes(data.version)&&data.token===token,'控制信息版本或本轮标识不符');
     const ids=(values,max)=>Array.isArray(values)&&values.length<=max&&new Set(values).size===values.length&&values.every(id=>validId(id)&&visibleIds.has(id));
@@ -35,8 +37,9 @@ export function outlineState(story,context) {
     return {chapter,nextIds:fresh?last.nextIds:[],at:last?.at??null};
 }
 export function chooseOutline(story,context,settings={}) {
-    const active=story.records.filter(r=>OUTLINE_KINDS.includes(r.kind)&&r.status==='active'&&!story.excluded.includes(r.id));
-    const state=outlineState(story,context),byId=new Map(active.map(r=>[r.id,r]));
+    const modern=story.records.some(r=>r.kind==='storyline');
+    const active=story.records.filter(r=>r.kind!=='storyline'&&!modern&&OUTLINE_KINDS.includes(r.kind)&&r.status==='active'&&!story.excluded.includes(r.id));
+    const state=modern?{chapter:null,nextIds:[],at:null}:outlineState(story,context),byId=new Map(active.map(r=>[r.id,r]));
     if(state.chapter)state.chapter={progress:state.chapter.progress,lineIds:state.chapter.lineIds.filter(id=>byId.get(id)?.kind==='line')};
     const requested=state.nextIds.map(id=>byId.get(id)).filter(Boolean);
     state.nextIds=requested.map(r=>r.id);

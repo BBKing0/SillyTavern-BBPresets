@@ -3,13 +3,14 @@ import {validateDraft} from './initialization.js';
 import {validatePrompts} from './prompt-templates.js';
 import {sourcePrefixes} from './source-prefix.js';
 export const SCHEMA = 1;
-export const OUTLINE_KINDS = ['core','line','chapter','clue'];
+export const LEGACY_OUTLINE_KINDS = ['core','line','chapter','clue'];
+export const OUTLINE_KINDS = ['storyline',...LEGACY_OUTLINE_KINDS];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
-export const KINDS = [...OUTLINE_KINDS, 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, prompts:{} });
+export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'world', 'guide', 'focus', 'experience'];
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, prompts:{} });
 export function recordCounts(doc) {
-    const counts={outline:0,writing:0,reference:0,archived:0,total:doc.records.length};
-    for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
+    const counts={outline:0,writing:0,inspiration:0,reference:0,archived:0,total:doc.records.length};
+    for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
     return counts;
 }
 export const copy = value => structuredClone(value);
@@ -22,7 +23,9 @@ export function validId(id) { return typeof id === 'string' && /^[a-zA-Z0-9_-]{1
 function keys(value, allowed) { assert(Object.keys(value).every(k=>allowed.includes(k)), '包含不支持的字段'); }
 export function validateRecord(r) {
     assert(r && validId(r.id) && KINDS.includes(r.kind), '条目身份或类别无效');
-    keys(r,['id','kind','title','blocks','locked','truth','status','importance','origin','sources','joiner','keywords','summary','links']);
+    keys(r,['id','kind','title','blocks','locked','truth','status','importance','origin','sources','joiner','keywords','summary','links','nextNode','creator']);
+    assert(r.nextNode===undefined||r.kind==='storyline'&&text(r.nextNode,500),'下一个节点格式无效或超过 500 字符');
+    assert(r.creator===undefined||r.kind==='inspiration'&&['user','ai'].includes(r.creator),'灵感来源无效');
     assert(r.summary===undefined||text(r.summary,500),'条目摘要过长');
     assert(r.keywords===undefined||(Array.isArray(r.keywords)&&r.keywords.length<=30&&r.keywords.every(k=>text(k,100)&&k.trim())),'关键词格式无效');
     assert(r.links===undefined||(Array.isArray(r.links)&&r.links.length<=50&&r.links.every(validId)),'关联条目格式无效');
@@ -31,11 +34,13 @@ export function validateRecord(r) {
     assert(['plan', 'intent', 'event', 'guidance'].includes(r.truth), '事实状态无效');
     assert(['active', 'archived'].includes(r.status), '条目状态无效');
     assert(['minor', 'major'].includes(r.importance), '重要程度无效');
-    assert(['manual', 'world', 'feedback', 'reflection', 'initialization','outline'].includes(r.origin), '条目来源类别无效');
+    assert(['manual', 'world', 'feedback', 'reflection', 'initialization','outline','storycontrol'].includes(r.origin), '条目来源类别无效');
     assert(Array.isArray(r.sources) && r.sources.length <= 5000 && r.sources.every(s => text(s.chatKey, 500) && validId(s.id) && text(s.hash, 100)), '来源无效');
     assert(Array.isArray(r.blocks) && r.blocks.length > 0 && r.blocks.length <= 100, '文字段落数量无效');
     const ids = new Set();
     for (const b of r.blocks) { keys(b,['id','text','locked']); assert(validId(b.id) && !ids.has(b.id) && text(b.text,150000) && typeof b.locked === 'boolean', '文字段落无效'); ids.add(b.id); }
+    if(r.kind==='storyline')assert(text(r.nextNode,500)&&r.blocks.map(b=>b.text).join(r.joiner??'\n\n').trim()&&r.blocks.reduce((n,b)=>n+b.text.length,0)<=500,'故事核须简短且非空（最多 500 字符），并包含下一个节点');
+    if(r.kind==='inspiration')assert(r.blocks.map(b=>b.text).join('').trim()&&r.blocks.reduce((n,b)=>n+b.text.length,0)<=1000&&['user','ai'].includes(r.creator),'灵感须非空且不超过 1000 字符');
     return r;
 }
 export function validateDocument(doc) {
@@ -62,8 +67,9 @@ export function validateDocument(doc) {
     const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
     if(doc.activity!==undefined){assert(doc.type==='story'&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
-    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2].includes(a.controlVersion),'最近状况协议版本无效');
-    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
+    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2,3].includes(a.controlVersion),'最近状况协议版本无效');
+    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2,3].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
+    for(const c of doc.controls??[])if(c.version===3){assert(c.chapter===null&&c.nextIds.length===0,'新版控制不使用章节或选条');for(const key of ['addedInspirationIds','usedInspirationIds','updatedNodeIds'])assert(Array.isArray(c[key])&&c[key].length<=20&&c[key].every(validId),'故事控制回执无效');}
     for(const f of doc.feedback)assert(!f.source||source(f.source),'点评来源无效');
     assert(doc.processed.every(x=>text(x,300))&&doc.excluded.every(validId),'处理记录或排除列表无效');
     for(const h of doc.history){
@@ -85,6 +91,8 @@ export function validateSettings(s) {
     assert(s.plotConnection===undefined||['main','custom'].includes(s.plotConnection),'剧情点评连接无效');
     assert(s.feedbackThreshold===undefined||Number.isInteger(s.feedbackThreshold)&&s.feedbackThreshold>=1&&s.feedbackThreshold<=100,'点评总结阈值须为 1—100');
     assert(s.waitOutline===undefined||typeof s.waitOutline==='boolean','等待修订设置无效');
+    assert(s.inspirationAiEnabled===undefined||typeof s.inspirationAiEnabled==='boolean','AI 灵感维护设置无效');
+    for(const [k,min,max] of [['inspirationCapacity',1,200],['inspirationInjectCount',0,20]])assert(s[k]===undefined||Number.isInteger(s[k])&&s[k]>=min&&s[k]<=max,`${k} 超出范围 ${min}—${max}`);
     assert(s.outlineInjection===undefined||['requested','full'].includes(s.outlineInjection),'大纲注入方式无效');
     for(const [k,min,max] of [['outlineMaxEntries',1,12],['outlineDirectoryChars',300,6000]])assert(s[k]===undefined||Number.isInteger(s[k])&&s[k]>=min&&s[k]<=max,`${k} 超出范围 ${min}—${max}`);
     for (const [k, min, max] of [['frequency',1,100],['reflectionFrequency',1,500],['contextRounds',1,30],['maxInputChars',2000,150000],['injectionChars',500,40000],['timeoutSeconds',10,300]]) assert(Number.isInteger(s[k]) && s[k] >= min && s[k] <= max, `${k} 超出范围 ${min}—${max}`);
@@ -110,7 +118,7 @@ export function migrateAuthor(doc) {
     return validateDocument(next);
 }
 export function record({id = uid(), kind = 'world', title = '', body = '', ...rest} = {}) {
-    return validateRecord({ id, kind, title, blocks: [{id:uid(),text:body,locked:false}], locked:false, truth:OUTLINE_KINDS.includes(kind)?'plan':kind === 'world' ? 'intent' : 'guidance', status:'active', importance:'minor', origin:'manual', sources:[], ...rest });
+    return validateRecord({ id, kind, title, blocks: [{id:uid(),text:body,locked:false}], locked:false, truth:OUTLINE_KINDS.includes(kind)||kind==='inspiration'?'plan':kind === 'world' ? 'intent' : 'guidance', status:'active', importance:'minor', origin:'manual', sources:[], ...(kind==='storyline'?{nextNode:''}:{}),...(kind==='inspiration'?{creator:'user'}:{}), ...rest });
 }
 function canChange(before, after, actor) {
     if (!before || actor === 'user') return;
@@ -136,7 +144,8 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
             after = copy(change.record);
             if (actor !== 'user') {
                 // Models never own protection or provenance. Do not accept permission flags in model output.
-                assert(after.locked === undefined && after.origin === undefined && after.sources === undefined && after.joiner === undefined && after.blocks?.every(b => b.locked === undefined), '模型不能提供保护、来源或权限字段');
+                assert(after.locked === undefined && after.origin === undefined && after.sources === undefined && after.joiner === undefined && after.creator === undefined && after.blocks?.every(b => b.locked === undefined), '模型不能提供保护、来源或权限字段');
+                if(after.kind==='inspiration')after.creator=before?.creator??'ai';
                 if(before?.joiner!==undefined)after.joiner=before.joiner;
                 after.locked = before?.locked ?? false;
                 after.blocks = after.blocks.map(b => ({...b, locked:before?.blocks.find(x=>x.id === b.id)?.locked ?? false}));
@@ -146,6 +155,7 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
                 if (origin === 'world') assert(['world','focus'].includes(after.kind)&&(!before||['world','focus'].includes(before.kind)), '世界维护不能冒充用户偏好');
                 if (origin === 'feedback') assert(['guide','focus','experience'].includes(after.kind)&&(!before||['guide','focus','experience'].includes(before.kind)), '点评不能改写世界事实');
                 if (origin === 'outline') assert(OUTLINE_KINDS.includes(after.kind)&&(!before||OUTLINE_KINDS.includes(before.kind)), '改纲只能修改大纲条目');
+                if (origin === 'storycontrol') assert(['storyline','inspiration'].includes(after.kind)&&(!before||before.kind===after.kind),'正文只能维护故事节点和灵感');
             } else after.origin='manual';
             validateRecord(after);
         } else {
@@ -172,12 +182,12 @@ export function invalidateSources(doc, chatKey, currentSources) {
     // A source-invalid deletion has no current record to visit. Restore its before-image
     // only when it is still the last change for that ID (never undo a later user edit).
     const latest=new Map();for(const h of next.history)for(const c of h.changes)latest.set(c.id,{h,c});
-    for(const {h,c} of latest.values())if(!c.after&&h.actor==='ai'&&['world','outline','initialization'].includes(h.origin)&&invalid(h)&&!next.records.some(r=>r.id===c.id)&&c.before&&!invalid(c.before)){
+    for(const {h,c} of latest.values())if(!c.after&&h.actor==='ai'&&['world','outline','initialization','storycontrol'].includes(h.origin)&&invalid(h)&&!next.records.some(r=>r.id===c.id)&&c.before&&!invalid(c.before)){
         next.records.push(copy(c.before));next.history.push({id:uid(),key:uid(),actor:'system',origin:'invalidation',sources:[],anchor:null,at:Date.now(),changes:[{id:c.id,before:null,after:copy(c.before)}]});
     }
     for (const r of [...next.records]) {
         // Feedback and deliberate author experience survive a changed source passage.
-        if (!['world','focus',...OUTLINE_KINDS].includes(r.kind) || !invalid(r)) continue;
+        if (!['world','focus','inspiration',...OUTLINE_KINDS].includes(r.kind) || !invalid(r)) continue;
         const hasProtection = r.locked || r.blocks.some(b=>b.locked);
         if (hasProtection || r.origin === 'manual') {
             if (!next.excluded.includes(r.id)) next.excluded.push(r.id);

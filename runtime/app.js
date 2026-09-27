@@ -7,8 +7,9 @@ import {promptText,exportPrompts,importPrompts} from '../core/prompt-templates.j
 import {responseText} from '../core/json.js';
 import {parseControl,stripControl,outlineState} from '../core/outline.js';
 import {sourcePrefixes} from '../core/source-prefix.js';
+import {storyControlChanges} from '../core/story.js';
 
-const outlineHash=doc=>hash(JSON.stringify(doc.records.filter(r=>OUTLINE_KINDS.includes(r.kind))));
+const outlineHash=doc=>hash(JSON.stringify({records:doc.records.filter(r=>OUTLINE_KINDS.includes(r.kind)||r.kind==='inspiration'),excluded:doc.excluded}));
 
 export class BBPresetsApp {
     constructor(host,{notify=()=>{},visible=()=>!globalThis.document?.hidden}={}) {
@@ -151,25 +152,33 @@ export class BBPresetsApp {
             await this.edit('profile',d=>{d.activeAuthorId=id;return d;});assert(epoch===this.epoch,'切换作者期间资料已变化');this.authorProfile=id==='profile'?null:selected;
         }finally{if(epoch===this.epoch){this.ready=true;this.changed();}}
     }
-    async selectStory(id,{keepPreparation=false}={}) {
+    async selectStory(id,{keepPreparation=false,following=false}={}) {
+        if(this.ready)await this.flushDraft();
         const prepared=keepPreparation?this.preparedGeneration:null;
-        this.suspend();if(prepared)prepared.cancelled=false;const epoch=this.epoch,identity=this.host.identity();await this.edits;await this.repo.refresh();
+        this.suspend();if(prepared)prepared.cancelled=false;const epoch=this.epoch,identity=this.host.identity();
+        try{
+        await this.edits;await this.repo.refresh();
         const selected=await this.repo.load(id);assert(selected?.data.type==='story','请选择故事存档');
         assert(epoch===this.epoch&&identity.chatKey===this.host.identity().chatKey,'选择期间聊天已变化');assert(identity.chatKey,'请先打开聊天');
-        this.story=await this.upgrade(selected,epoch);
-        this.selectedKey=identity.chatKey;
+        const profile=await this.repo.load('profile');assert(epoch===this.epoch,'读取存档期间聊天变化');this.profile=await this.upgrade(profile,epoch);
+        // A manual load is an explicit choice of independent mode, not an unusable disabled button.
+        if(!following&&this.settings.memoryFollow)await this.edit('profile',d=>{d.settings.memoryFollow=false;return d;});
+        const chosen=await this.upgrade(selected,epoch);
         await this.persistStoryBinding(id,identity.chatKey,epoch);
         assert(epoch===this.epoch&&this.host.identity().chatKey===identity.chatKey,'保存绑定期间聊天变化');
+        this.story=chosen;this.selectedKey=identity.chatKey;
         await this.loadDraft();assert(epoch===this.epoch,'读取草稿期间故事已切换');
         this.ready=true;this.changed();
         await this.reconcile();
+        }finally{if(epoch===this.epoch){this.ready=Boolean(this.profile&&this.selectedKey===identity.chatKey);this.changed();}}
     }
     async persistStoryBinding(storyId,chatKey,epoch=this.epoch){
         const guard=()=>epoch===this.epoch&&chatKey===this.host.identity().chatKey;
         await this.edit('profile',d=>{d.chatBindings??=[];const old=d.chatBindings.find(b=>b.chatKey===chatKey);if(old)old.storyId=storyId;else d.chatBindings.push({chatKey,storyId});return d;},{guard});
         assert(guard(),'保存绑定期间聊天变化');
         const ctx=this.host.ctx(),binding={storyId,chatKey};
-        if(!same(ctx.chatMetadata.bbpresetsBinding,binding)){ctx.chatMetadata.bbpresetsBinding=binding;await ctx.saveMetadata();}
+        assert(ctx.chatMetadata&&typeof ctx.saveMetadata==='function','当前酒馆缺少聊天 metadata 保存能力');
+        if(!same(ctx.chatMetadata.bbpresetsBinding,binding)){const previous=ctx.chatMetadata.bbpresetsBinding;ctx.chatMetadata.bbpresetsBinding=binding;try{await ctx.saveMetadata();this.bindingWarning='';}catch(error){if(guard())ctx.chatMetadata.bbpresetsBinding=previous;this.bindingWarning='聊天绑定副本保存失败；服务器存档绑定已保存，刷新可重试：'+error.message;this.notify(this.bindingWarning,'error');}}
         assert(guard(),'保存绑定期间聊天变化');
     }
     async reconcile() {
@@ -239,8 +248,8 @@ export class BBPresetsApp {
         const baseHash=await outlineHash(validStory);
         assert(epoch===this.epoch&&!this.sendCancelled,'准备注入期间聊天已变化');
         this.currentSources=atSend.sources;
-        this.generation=this.story?{token,epoch,storyId:this.story.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,visibleIds:frozen.visibleIds,counts:frozen.counts,controlEnabled:frozen.controlEnabled}:null;
-        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入剧情目标协议；本轮大纲正文 ${frozen.counts.outline} 条，等待回复`:this.story?'当前没有启用的大纲条目，未要求正文维护；请先建纲或启用条目':'当前未绑定大纲，未要求正文维护';this.changed();
+        this.generation=this.story?{token,epoch,storyId:this.story.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,visibleIds:frozen.visibleIds,lineIds:frozen.lineIds,inspirationIds:frozen.inspirationIds,counts:frozen.counts,controlEnabled:frozen.controlEnabled}:null;
+        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入故事节点与灵感协议；本轮故事核/旧纲 ${frozen.counts.outline} 条、灵感 ${frozen.counts.inspiration??0} 条，等待回复`:this.story?'当前没有启用的大纲条目，未要求正文维护；请先建纲或启用条目':'当前未绑定大纲，未要求正文维护';this.changed();
     }
     continueOldOutline(){assert(this.waitResolve,'当前没有等待中的正文');this.waitResolve('skip');return '本次正文将沿用等待前的大纲';}
     async receiveControl(floor,generation=this.generation){
@@ -258,10 +267,12 @@ export class BBPresetsApp {
         try{
         const now=new Map(context.sources.map(s=>[s.id,s.hash]));
         assert(generation.sources.every(s=>s.id===row.id||now.get(s.id)===s.hash),'正文生成期间来源变化，控制信息未应用');
-        const control=parseControl(row.text,generation.token,new Set(generation.visibleIds));
+        const control=parseControl(row.text,generation.token,new Set(generation.visibleIds),{lineIds:new Set(generation.lineIds??[]),inspirationIds:new Set(generation.inspirationIds??[])});
         activity.status='applied';activity.controlVersion=control.version;activity.chapterChanged=Boolean(control.version===2&&control.chapter&&!same(control.chapter,previous));activity.revisionRequested=Boolean(control.revise);
         const sources=context.sources.filter(s=>s.floor<=row.floor);
-        const receipt={id:uid(),version:control.version,token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter,nextIds:control.nextIds,at:Date.now()};
+        const local=control.version===3?storyControlChanges(this.story.data,control,this.settings,{...context,rows:context.rows.filter(r=>r.floor<row.floor)}):null;
+        if(local)activity.chapterChanged=local.updatedNodeIds.length>0;
+        const receipt={id:uid(),version:control.version,token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter??null,nextIds:control.nextIds??[],...(local?{addedInspirationIds:local.addedInspirationIds,usedInspirationIds:local.usedInspirationIds,updatedNodeIds:local.updatedNodeIds}:{}),at:Date.now()};
         if(control.chapter)assert(control.chapter.lineIds.every(id=>this.story.data.records.some(r=>r.id===id&&r.kind==='line')),'章节引用必须是故事线');
         // Prepare once before the atomic receipt + task commit; a failed preparation is retryable.
         let job=null;
@@ -271,9 +282,11 @@ export class BBPresetsApp {
         await this.edit(this.story.data.id,async d=>{
             assert(generation.epoch===this.epoch&&await outlineHash(d)===generation.baseHash,'正文期间大纲已变化，控制信息未应用；可重新规划');
             d.controls??=[];if(d.controls.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return d;
+            if(local?.changes.length)d=applyChanges(d,local.changes,{origin:'storycontrol',sources,key,anchor:source});
             d.controls.push(receipt);if(job){assert(d.jobs.length<60,'任务队列已满，控制信息未应用');d.jobs.push(job);}return saveActivity(d);
         });
-        this.controlStatus=control.version===1?'已保存旧版控制记录；旧摘要不作为剧情目标。请在工具→提示词更新尾部控制信息为 v2 协议':job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):`本轮控制信息已保存：剧情目标${activity.chapterChanged?'已更新':'沿用'}，下轮申请 ${control.nextIds.length} 条${this.settings.outlineInjection==='full'?'（当前为完整注入模式）':`（最多调用 ${this.settings.outlineMaxEntries??3} 条）`}；无额外模型请求`;this.changed();
+        if(local){this.controlStatus=`故事节点更新 ${local.updatedNodeIds.length} 条；灵感新增 ${local.addedInspirationIds.length} 条、已使用归档 ${local.usedInspirationIds.length} 条${local.skipped.length?'；'+local.skipped.join('；'):''}${job?'；故事核修订已排队':''}。无逐轮额外模型请求`;this.changed();return;}
+        this.controlStatus=control.version===1?'已保存旧版控制记录；旧摘要不作为剧情目标。请在工具→提示词更新尾部控制信息为 v3 故事节点与灵感协议':job?(job.state==='held'?'收到改纲意图，手动模式下等待运行':'已收到改纲意图，等待主连接修订'):`本轮控制信息已保存：剧情目标${activity.chapterChanged?'已更新':'沿用'}，下轮申请 ${control.nextIds.length} 条${this.settings.outlineInjection==='full'?'（当前为完整注入模式）':`（最多调用 ${this.settings.outlineMaxEntries??3} 条）`}；无额外模型请求`;this.changed();
         }catch(error){
             if(guard()){activity.status='invalid';activity.titleChanged=false;activity.chapterChanged=false;activity.revisionRequested=false;await this.edit(generation.storyId,saveActivity,{guard}).catch(()=>{});}
             throw error;
@@ -284,13 +297,13 @@ export class BBPresetsApp {
         const recent=(this.story?.data.activity??[]).filter(a=>a.chatKey===chatKey&&hashes.get(a.source.id)===a.source.hash&&prefixes.get(a.source.id)===a.prefixHash).slice(-5);
         const updates=(this.story?.data.history??[]).filter(h=>['outline','initialization'].includes(h.origin)&&h.changes.length&&h.sources?.length&&h.sources.every(s=>s.chatKey===chatKey&&hashes.get(s.id)===s.hash));
         const counts=this.lastInjection.counts??recent.at(-1);
-        const lines=[counts?`最近正文注入：大纲 ${counts.outline} 条 · 写作 ${counts.writing} 条（目录 ${counts.directory} 条）`:'尚无正文调用记录'];
-        if(recent.length)lines.push(`最近 ${recent.length} 轮：剧情目标更新 ${recent.filter(a=>a.controlVersion===2&&a.chapterChanged).length} 次`);
+        const lines=[counts?`最近正文注入：故事核/旧纲 ${counts.outline} 条 · 灵感 ${counts.inspiration??0} 条 · 写作 ${counts.writing} 条（目录 ${counts.directory} 条）`:'尚无正文调用记录'];
+        if(recent.length)lines.push(`最近 ${recent.length} 轮：剧情目标更新 ${recent.filter(a=>[2,3].includes(a.controlVersion)&&a.chapterChanged).length} 次`);
         const lastUpdate=updates.at(-1);lines.push(lastUpdate?`最近大纲修订：已保存 ${lastUpdate.changes.length} 项变更`:'大纲修订：尚无已应用的 AI 变更');
         for(const a of [...recent].reverse()){
             const floor=sources.find(s=>s.id===a.source.id)?.floor;
             const revision=updates.some(h=>(h.anchor??h.sources.at(-1))?.id===a.source.id)?' · 已改纲':a.revisionRequested?' · 已请求改纲，进度见任务':'';
-            lines.push(`#${floor??'?'} 楼 · ${a.status==='not-requested'?'尚无启用的大纲，未要求更新':a.status==='missing'?'未返回控制块':a.status==='invalid'?'控制未通过校验':a.controlVersion!==2?'旧版章节记录':`剧情目标${a.chapterChanged?'已更新':'沿用'}`}${revision}`);
+            lines.push(`#${floor??'?'} 楼 · ${a.status==='not-requested'?'尚无启用的大纲，未要求更新':a.status==='missing'?'未返回控制块':a.status==='invalid'?'控制未通过校验':a.controlVersion===3?'故事节点与灵感已处理':a.controlVersion!==2?'旧版章节记录':`剧情目标${a.chapterChanged?'已更新':'沿用'}`}${revision}`);
         }
         lines.push(`本次打开：API 请求 ${this.stats.calls} 次 · 任务成功 ${this.stats.success} / 失败 ${this.stats.failed}`);
         return lines;
@@ -361,7 +374,7 @@ export class BBPresetsApp {
                 const options={origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor,feedbackIds:job.feedback.map(f=>f.id).filter(Boolean)};
                 if(job.kind==='initialization')for(const c of changes)assert(OUTLINE_KINDS.includes(c.op==='put'?c.record?.kind:d.records.find(r=>r.id===c.id)?.kind),'初始化只修改大纲；写作偏好请在个性化作者中维护');
                 const candidate=applyChanges(d,changes,options); // Validate protection even in review mode.
-                if(job.kind==='initialization')assert(candidate.records.some(r=>r.kind==='core'&&r.status==='active')&&candidate.records.some(r=>r.kind==='line'&&r.status==='active'),'初始大纲需要故事核心和至少一条故事线，请检查提示词后重试');
+                if(job.kind==='initialization')assert(candidate.records.some(r=>r.kind==='storyline'&&r.status==='active')||candidate.records.some(r=>r.kind==='core'&&r.status==='active')&&candidate.records.some(r=>r.kind==='line'&&r.status==='active'),'初始资料需要至少一条故事核，请检查提示词后重试');
                 const resultCopy={baseHash,promptHash,chatKey:job.chatKey,result};this.resultCache.set(cacheKey,resultCopy);await this.writeLocal(cacheKey,resultCopy);
                 const important=changes.some(c=>c.op==='remove'||c.record?.importance==='major'||d.records.find(r=>r.id===(c.id??c.record?.id))?.importance==='major') || job.kind==='feedback'||job.kind==='initialization';
                 let next;this.requestState='应用与保存';
@@ -506,7 +519,23 @@ export class BBPresetsApp {
         await this.flushDraft();await this.edits;
         assert(epoch===this.epoch&&id===this.story?.data.id,'故事已切换，请在当前故事重新保存');
         await this.edit(id,d=>{d.manualSavedAt=Math.max(Date.now(),(d.manualSavedAt??0)+1);return d;});
-        return '当前存档已保存到酒馆服务器；可在“工具 → 版本恢复”查看版本';
+        return '已保存到酒馆服务器并建立手动保存点；后续自动保存不会覆盖此保存点';
+    }
+    async saveAsStory(title){
+        assert(this.ready&&this.story&&title?.trim(),'请填写新存档名称');
+        const epoch=this.epoch,id=this.story.data.id;await this.flushDraft();await this.edits;
+        assert(epoch===this.epoch&&id===this.story?.data.id,'另存期间当前故事已变化');
+        const data=copy(this.story.data);data.id=uid();data.title=title.trim();data.jobs=[];data.proposals=[];data.memoryBinding=null;data.bindings=[];data.parent={storyId:id,at:Date.now()};data.manualSavedAt=Date.now();
+        for(const f of data.feedback)if(f.status==='queued')f.status='saved';
+        await this.repo.save(data,0,()=>epoch===this.epoch);this.changed();return '已另存为独立存档“'+data.title+'”；当前仍使用原存档';
+    }
+    async loadSavedStory(id){
+        await this.selectStory(id);
+        const epoch=this.epoch,revision=this.story.revision;
+        const entry=this.repo.index.documents[id]?.saved;assert(entry,'此档还没有手动保存点，请先保存存档');
+        const historical=await this.repo.loadVersion(id,entry);
+        await this.edit(id,d=>{const next=restoreDocument(d,historical.data);next.manualSavedAt=d.manualSavedAt;return next;},{guard:()=>epoch===this.epoch&&this.story?.data.id===id&&this.story.revision===revision});
+        await this.reconcile();return '已读取手动保存点；加载前的版本保留在版本恢复中';
     }
     get progress(){
         const d=this.story?.data;if(!d)return {floor:null,reflectionAt:null};
@@ -527,7 +556,7 @@ export class BBPresetsApp {
     async saveRecord(target,r,expected=undefined) {
         const context=this.host.identity().chatKey?await this.host.capture():{sources:[]};
         assert(this.documentFor(target)?.data.type==='story'||AUTHOR_KINDS.includes(r.kind),'个性化作者只能保存写作建议与经验');
-        await this.edit(target,d=>{if(expected!==undefined)assert(same(d.records.find(x=>x.id===r.id)??null,expected),'条目已变化，输入仍保留；请重新打开最新条目后合并');return applyChanges(d,[{op:'put',record:r}],{actor:'user',anchor:context.sources.at(-1)??null});});
+        await this.edit(target,d=>{const before=d.records.find(x=>x.id===r.id)??null;if(expected!==undefined)assert(same(before,expected),'条目已变化，输入仍保留；请重新打开最新条目后合并');if(r.kind==='inspiration'&&r.status==='active'&&before?.status!=='active')assert(d.records.filter(x=>x.kind==='inspiration'&&x.status==='active').length<(this.settings.inspirationCapacity??20),'待用灵感已达上限，请先归档或提高上限');return applyChanges(d,[{op:'put',record:r}],{actor:'user',anchor:context.sources.at(-1)??null});});
     }
     feedbackConnection(category='writing'){return category==='plot'?(this.settings.plotConnection??'main'):this.settings.connection;}
     async addFeedback({quote,note='',polarity='neutral',source=null,status='saved',category='writing',connection}) {
@@ -611,7 +640,7 @@ export class BBPresetsApp {
         let target=null;
         for(const [id,entry] of Object.entries(this.repo.index.documents)){if(entry.type!=='story')continue;const story=await this.repo.load(id);if(story.data.memoryBinding?.signature===m.signature){assert(!target,'同一个 BB-Memory 槽映射了多个故事，请关闭联动并重新确认映射');target=id;}}
         assert(epoch===this.epoch&&chatKey===this.host.identity().chatKey,'读取 BB-Memory 映射期间聊天已切换');
-        if(target)await this.selectStory(target,{keepPreparation});else {this.host.inject('');this.error='当前 BB-Memory 槽没有已确认映射；未自动猜测或复制，请在工作台选择故事并确认对应';this.changed();throw Error(this.error);}
+        if(target)await this.selectStory(target,{keepPreparation,following:true});else {this.host.inject('');this.error='当前 BB-Memory 槽没有已确认映射；未自动猜测或复制，请在工作台选择故事并确认对应';this.changed();throw Error(this.error);}
     }
     async restore(id,entry){const historical=await this.repo.loadVersion(id,entry);await this.edit(id,d=>{const next=restoreDocument(d,historical.data);if(d.type==='profile'){next.activeAuthorId=d.activeAuthorId??'profile';if(d.chatBindings)next.chatBindings=copy(d.chatBindings);}return next;});}
     async exportAll(){const documents=[];for(const id of Object.keys(this.repo.index.documents))documents.push((await this.repo.load(id)).data);return {format:'bbpresets-export',schema:1,at:Date.now(),documents};}
