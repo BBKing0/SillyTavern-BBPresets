@@ -26,7 +26,7 @@ export function download(value,name='BBPresets-export.json'){
 
 export class Workbench {
     constructor(app){
-        this.app=app;this.tab='overview';this.revealed=false;this.selection=null;this.selectedFeedback=new Set();this.storyId=null;this.editor=null;this.expandedRecords=new Set();this.recordDrafts=new Map();this.promptDrafts={};this.feedbackDrafts=new Map();
+        this.app=app;this.tab='overview';this.revealed=false;this.selection=null;this.selectedFeedback=new Set();this.storyId=null;this.editor=null;this.expandedRecords=new Set();this.recordDrafts=new Map();this.promptDrafts={};this.feedbackDrafts=new Map();this.inspirationDrafts=new Map();
         this.ui={showBall:true,feedbackOpen:true,polarity:'positive',intent:'save',category:'writing'};try{const saved=JSON.parse(localStorage.getItem(UI_KEY));if(saved){this.ui.showBall=saved.showBall!==false;this.ui.feedbackOpen=saved.feedbackOpen!==false;for(const [key,allowed] of Object.entries({polarity:['positive','negative','neutral'],intent:['save','batch','send'],category:['writing','plot']}))if(allowed.includes(saved[key]))this.ui[key]=saved[key];if(Number.isFinite(saved.left)&&Number.isFinite(saved.top)){this.ui.left=saved.left;this.ui.top=saved.top;}}}catch{/* Storage restrictions must not prevent opening the workspace. */}
         this.surface=el('div');this.surface.id='bbpresets-surface';
         // A zero-size host never intercepts the chat. Only the panel and ball receive pointers.
@@ -53,7 +53,7 @@ export class Workbench {
         document.addEventListener('pointerup',this.onSelection);
         this.entry=el('div','','bbp-entry inline-drawer');this.entry.id='bbpresets-entry';
         const summary=el('div','','inline-drawer-toggle inline-drawer-header bbp-entry-toggle');summary.setAttribute('role','button');summary.tabIndex=0;this.summary=summary;
-        summary.append(el('b','BBPresets v0.5.6'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
+        summary.append(el('b','BBPresets v0.5.7'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
         this.entryContent=el('div','','inline-drawer-content bbp-entry-content');this.entryContent.id='bbpresets-entry-content';this.entryContent.hidden=true;
         summary.setAttribute('aria-expanded','false');summary.setAttribute('aria-controls',this.entryContent.id);
         // Own this click so ST's delegated slideToggle cannot toggle a second time.
@@ -73,7 +73,7 @@ export class Workbench {
         this.quickRecent=el('details','','bbp-recent');this.quickRecentSummary=el('summary','最近状况');this.quickRecentBody=el('div');this.quickRecent.append(this.quickRecentSummary,this.quickRecentBody);this.quickRecent.addEventListener('toggle',()=>this.layout());
         this.quick.append(quickHeader,this.quickMessage,this.quickContent);this.shadow.append(this.quick);this.quickActions();
         this.ball=el('button','✦','bbp-ball');this.ball.type='button';this.ball.setAttribute('aria-label','打开 BBPresets 快捷操作');this.ball.setAttribute('aria-controls',this.quick.id);this.ball.setAttribute('aria-expanded','false');this.ball.title='BBPresets · 点击展开，可拖动';
-        const toggle=()=>{if(this.quick.hidden)this.quickActions();this.quick.hidden=!this.quick.hidden;this.ball.setAttribute('aria-expanded',String(!this.quick.hidden));this.layout();};
+        const toggle=()=>{if(this.quick.hidden)this.quickActions();this.quick.hidden=!this.quick.hidden;this.refreshQuickInspiration?.();this.ball.setAttribute('aria-expanded',String(!this.quick.hidden));this.layout();};
         this.ball.addEventListener('click',e=>{if(e.detail!==0&&(this.dragged||this.pointerActivated)){this.dragged=false;this.pointerActivated=false;return;}toggle();});this.shadow.append(this.ball);
         this.ball.addEventListener('pointerdown',e=>{if(e.button!==0)return;const r=this.ball.getBoundingClientRect();this.drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};this.dragged=false;this.pointerActivated=false;this.ball.setPointerCapture(e.pointerId);});
         this.ball.addEventListener('pointermove',e=>{if(!this.drag)return;const dx=e.clientX-this.drag.x,dy=e.clientY-this.drag.y;if(Math.abs(dx)+Math.abs(dy)>6)this.dragged=true;if(!this.dragged)return;this.placeBall({left:this.drag.left+dx,top:this.drag.top+dy});});
@@ -91,7 +91,37 @@ export class Workbench {
         const section=el('details','','bbp-quick-feedback');section.open=this.ui.feedbackOpen;section.append(el('summary','划线评'));
         if(a.author)section.append(this.feedbackComposer(true));else section.append(el('p','正在读取作者资料…'));
         section.addEventListener('toggle',()=>{if(!section.isConnected)return;this.ui.feedbackOpen=section.open;this.saveUI();this.layout();});
-        c.append(section,this.button('快速保存',()=>a.saveCurrent()),this.button('查看故事核',()=>{this.open('records');this.close();}),this.quickStatus,this.quickRecent);
+        c.append(section,this.quickInspiration(),this.button('快速保存',()=>a.saveCurrent()),this.button('查看故事核',()=>{this.open('records');this.close();}),this.quickStatus,this.quickRecent);
+    }
+    quickInspiration(){
+        const a=this.app,section=el('details','','bbp-quick-inspiration');section.append(el('summary','灵感激发点'));
+        section.addEventListener('toggle',()=>this.layout());
+        if(!a.story){section.append(el('p','请先打开聊天并加载故事。'),this.button('选择故事存档',()=>{this.open('archives');this.close();}));return section;}
+        const id=a.story.data.id,key=id+':'+a.host.identity().chatKey;
+        if(!this.inspirationDrafts.has(key))this.inspirationDrafts.set(key,{text:''});
+        const draft=this.inspirationDrafts.get(key),text=area(draft.text);text.rows=3;text.maxLength=1000;text.placeholder='想看什么情节？留待合适时机自然发生。';
+        text.addEventListener('input',()=>{draft.text=text.value;});
+        const count=el('p','','bbp-hint'),list=el('div','','bbp-quick-ideas');
+        section.append(field('灵感内容',text),this.button('保存灵感',async()=>{
+            assert(a.story?.data.id===id&&id+':'+a.host.identity().chatKey===key,'故事已切换，请回原故事继续保存');
+            const value=text.value.trim();assert(value,'请先填写灵感内容');
+            await a.saveRecord(id,record({kind:'inspiration',title:value.slice(0,40),body:value}),null);
+            if(text.value.trim()===value){draft.text='';text.value='';}
+            return '灵感已保存到当前故事，等待合适时机使用';
+        }),count,list,this.button('管理全部灵感',()=>{this.open('inspirations');this.close();}));
+        let revision;
+        this.refreshQuickInspiration=()=>{
+            const current=[a.story?.revision,a.settings.inspirationCapacity,a.settings.inspirationInjectCount,a.settings.injectInspiration].join(':');
+            if(!section.isConnected||a.story?.data.id!==id||revision===current)return;
+            revision=current;const all=a.story.data.records.filter(r=>r.kind==='inspiration'),pending=all.filter(r=>r.status==='active');
+            count.textContent='待用 '+pending.length+' / '+a.settings.inspirationCapacity+' · 已归档 '+(all.length-pending.length)+' · '+(a.settings.injectInspiration===false?'灵感注入已关闭':'每轮最多注入 '+a.settings.inspirationInjectCount+' 条');
+            list.replaceChildren();
+            for(const item of pending.slice(-5).reverse()){
+                const row=el('details');row.append(el('summary',item.title||'未命名灵感'),el('p',body(item),'bbp-prose'),el('small',item.creator==='ai'?'AI 素材':'用户期待'),this.button('归档此灵感',async()=>{await a.saveRecord(id,{...copy(item),status:'archived'},item);return '灵感已归档';}));list.append(row);
+            }
+            if(pending.length>5)list.append(el('p','最近显示 5 条，其余可在“管理全部灵感”查看。','bbp-hint'));
+        };
+        return section;
     }
     feedbackComposer(quick=false){
         const a=this.app,key=a.author.data.id+':'+(a.story?.data.id??'')+':'+a.host.identity().chatKey;
@@ -153,7 +183,7 @@ export class Workbench {
         if(this.setupBuild?.isConnected)this.setupBuild.disabled=Boolean(a.preparing||a.auxiliary||a.buildingInitialization||a.running);
         this.statusMain.textContent=`故事：${s?.title??'未绑定'}\n作者：${a.author?.data.title??'尚未加载'}\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
         this.statusMore.textContent=`${landmarks} · 待办 ${a.jobs.length} / 提案 ${a.proposals.length}${draftState}${a.lastInjection.omitted?' · 注入预算省略 '+a.lastInjection.omitted+' 条':''}${a.controlStatus?' · '+a.controlStatus:''}${a.host.controlWarning?' · '+a.host.controlWarning:''}${a.bindingWarning?' · '+a.bindingWarning:''}`;
-        this.updateArchiveCounts();this.updateControlDetails();this.refreshRecords?.();
+        this.updateArchiveCounts();this.updateControlDetails();this.refreshRecords?.();this.refreshQuickInspiration?.();
         if(this.quickStatus)this.quickStatus.textContent=`故事：${s?.title??'未绑定'} · ${s?recordCounts(s).outline:0} 条\n作者：${a.author?.data.title??'尚未加载'} · 写作 ${a.author?recordCounts(a.author.data).writing:0} 条\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
         const recent=a.recentStatus;
         for(const [summary,body] of [[this.recentSummary,this.recentBody],[this.quickRecentSummary,this.quickRecentBody]])if(summary&&body){summary.textContent='最近状况 · '+recent[0];body.replaceChildren(...recent.slice(1).map(text=>el('p',text,'bbp-hint')));}
@@ -164,7 +194,7 @@ export class Workbench {
         if(this.ball&&!this.quick.hidden)this.layout();
     }
     open(tab=this.tab){
-        if(tab!==this.tab){if(['settings','prompts'].includes(this.tab))this.pageCache.set(this.tab,[...this.content.childNodes]);this.tab=tab;const cached=this.pageCache.get(tab);if(cached)this.content.replaceChildren(...cached);else this.render();}
+        if(tab!==this.tab){if(this.editor){this.recordDrafts.set(this.editor.target+':'+this.editor.draft.id,this.editor);this.editor=null;}if(['settings','prompts'].includes(this.tab))this.pageCache.set(this.tab,[...this.content.childNodes]);this.tab=tab;const cached=this.pageCache.get(tab);if(cached)this.content.replaceChildren(...cached);else this.render();}
         else if(!this.content.children.length)this.render();
         this.setExpanded(true);this.updateNavigation();this.updateStatus();
     }
@@ -236,17 +266,19 @@ export class Workbench {
         const scroll=this.archiveList.scrollTop;this.archiveList.replaceChildren(...(rows.length?rows:[el('p','没有匹配的存档')]));this.archiveList.scrollTop=scroll;
     }
     setup(){
-        const a=this.app;if(!a.ready){this.waitingForStory=true;this.content.append(el('p','正在读取当前故事，请稍后。'));return;}this.waitingForStory=false;const d=a.ensureDraft();this.content.append(el('h2','为这个世界准备一个起点'),el('p','主 API 读取记忆、上下文与世界书后提出简短问题，再根据你的回答生成故事核。可以长答、跳过或补充想法。'));
+        const a=this.app;if(!a.ready){this.waitingForStory=true;this.content.append(el('p','正在读取当前故事，请稍后。'));return;}this.waitingForStory=false;const d=a.ensureDraft();this.content.append(el('h2','为这个世界准备一个起点'),el('p','主 API 读取角色卡、世界书与已确认的 BB-Memory 资料后提出简短问题（不发送聊天楼层正文），再根据你的回答生成故事核。可以长答、跳过或补充想法。'));
         const steps=el('ol','','bbp-steps'),phase=a.story.data.records.some(r=>r.kind==='storyline')||a.story.data.jobs.some(j=>j.kind==='initialization')||a.story.data.proposals.some(j=>j.kind==='initialization')?2:d.questions.length?1:0;
         ['1 读取资料','2 回答问题','3 生成故事核'].forEach((text,index)=>{const step=el('li',text);if(index===phase)step.setAttribute('aria-current','step');steps.append(step);});this.content.append(steps);
         this.content.append(el('p','提问与建立故事核使用酒馆主 API。响应较慢时会继续等原请求；不要反复重试。','bbp-hint'),this.button('查看连接设置',()=>this.open('settings')));
+        if(['questions','initialization','changeContract'].some(k=>Object.hasOwn(a.settings.prompts??{},k)))this.content.append(el('p','你正在使用自定义初始化模板。若模型返回 JSON 但无法应用，请对照新版默认值检查“初始化提问 / 建立故事核 / JSON 格式”；旧模板不会自动覆盖。','bbp-hint'),this.button('检查初始化提示词',()=>this.open('prompts')));
         this.setupRequestStatus=el('p','','bbp-request-status');this.setupRequestStatus.setAttribute('role','status');this.content.append(this.setupRequestStatus);
-        const generate=mode=>async()=>{await a.prepareInitialization(mode);if(this.tab==='setup')this.render();return mode==='append'?'补充问题已准备好，已有回答保留':'问题已准备好，已有回答保留';};
+        const generate=mode=>async()=>{try{await a.prepareInitialization(mode);return mode==='append'?'补充问题已准备好，已有回答保留':'问题已准备好，已有回答保留';}finally{if(this.tab==='setup')this.render();}};
         const controls=el('div','','bbp-actions');controls.append(this.button(d.questions.length?'重新生成问题（保留已答）':'读取资料，生成问题',generate('replace')));
         if(d.questions.length)controls.append(this.button('根据回答补充问题',generate('append')));
         controls.append(this.button('停止当前请求',()=>a.cancelRequests()));
         if(!d.questions.length)this.content.append(controls);
         if(d.request&&!a.preparing)this.content.append(el('p','上次提问尚未完成。已有问题与回答均保留，可重新生成或补充问题继续。','bbp-hint'));
+        if(d.request?.state==='failed'&&a.questionResponse?.storyId===a.story.data.id&&a.questionResponse.chatKey===a.host.identity().chatKey){const details=el('details');details.append(el('summary','查看本次提问响应（可能含剧透）'),el('pre',a.questionResponse.text||'模型没有返回文本'));this.content.append(details);}
         if(d.questions.length){
             const index=Math.max(0,Math.min(d.cursor,d.questions.length-1)),q=d.questions[index],card=el('section','','bbp-card bbp-question');
             card.append(el('small',`第 ${index+1} / ${d.questions.length} 题`),el('h3',q.question),el('p','参考示例：'+q.example,'bbp-hint'));
@@ -262,6 +294,8 @@ export class Workbench {
         this.content.append(field('自由补充 / 新想法',notes));
         if(d.previous.length){const previous=el('details');previous.append(el('summary',`已保留的往轮回答（${d.previous.length}）`));for(const q of d.previous){const answer=area(q.answer);answer.addEventListener('input',()=>a.updateInitialization(d=>{const item=d.previous.find(x=>x.id===q.id);if(item)item.answer=answer.value;}));previous.append(field(q.question,answer));}this.content.append(previous);}
         this.content.append(this.button('保存问答草稿',async()=>{await a.flushDraft();return '问答草稿已保存到酒馆服务器';}),this.button('导出问答草稿',()=>download(a.initialization,'BBPresets-initialization-draft.json')),this.setupBuild=this.button('建立初始资料',async()=>{await a.completeInitialization();this.tab='review';this.render();return a.story.data.jobs.some(j=>j.kind==='initialization'&&j.state==='failed')?'初始化未完成，请查看失败原因并重试':a.story.data.proposals.some(p=>p.kind==='initialization')?'初始资料已生成，请到提案中查看并应用':'初始资料已建立';}));
+        const materials=a.initializationInfo;if(materials){const n=materials.counts;this.content.append(el('p',n?`BB-Memory：时间线 ${n.timeline} · 里程碑 ${n.milestones} · 永久记忆 ${n.permanent} · 额外检索命中 ${n.retrieved}`:'本次未启用 BB-Memory 读取','bbp-hint'),el('p',materials.notes.join('；'),'bbp-hint'));}
+        if(!a.settings.memoryRead||!a.story.data.memoryBinding)this.content.append(el('p','需要 BB-Memory 三类记忆时，请先到设置开启读取并确认同故事映射；未开启时按独立模式初始化。','bbp-hint'),this.button('设置初始化记忆来源',()=>this.open('settings')));
         const info=a.host.seedInfo;if(info)this.content.append(el('p',`已参考：${info.sections.join('、')}。${info.omitted?`有 ${info.omitted} 份资料按预算节选。`:''}${info.notes.join('；')}`,'bbp-hint'));
         this.content.append(el('p','草稿会自动保存，收起侧栏不会清空。示例不会当作你的偏好；半自动模式下初始资料先生成提案。','bbp-hint'));this.updateStatus();
     }
@@ -277,7 +311,7 @@ export class Workbench {
         this.controlDetails.replaceChildren(el('h3','正文维护'),el('p',`故事核 ${lines.length} 条 · 灵感每轮最多注入 ${a.settings.inspirationInjectCount??3} 条`),...lines.map(r=>el('p',r.title+' · 下一个节点：'+(r.nextNode||'暂未安排'),'bbp-prose')),el('p',a.controlStatus||'节点按需更新，灵感实际使用后归档；不会为这些更新逐轮额外请求模型。','bbp-hint'));
     }
     inspirations(){
-        if(!this.authorGate())return;const a=this.app;
+        const a=this.app;
         this.content.append(el('h2','灵感激发点'),el('p','把暂时不适合当前场景、以后很想写的素材留在这里。AI 也可克制地补充；不要求下一轮兑现，正文实际使用后才归档。'));
         const options=this.section('数量与注入'),capacity=input(a.settings.inspirationCapacity??20,'number'),count=input(a.settings.inspirationInjectCount??3,'number'),enabled=check(a.settings.inspirationAiEnabled!==false);capacity.min=1;capacity.max=200;count.min=0;count.max=20;
         options.append(field('待用灵感数量上限',capacity),field('每轮注入灵感条数',count),field('允许 AI 新增和修订灵感',enabled),this.button('保存灵感设置',async()=>{await a.saveSettings({...a.settings,inspirationCapacity:Number(capacity.value),inspirationInjectCount:Number(count.value),inspirationAiEnabled:enabled.checked},copy(a.settings));return '灵感设置已保存；降低上限不会删除已有素材';}),el('p','默认待用上限 20、每轮注入 3，可设为 0。用户期待优先，同组按创建顺序；字符预算不足时省略。AI 每轮最多新增 1 条，新增后的两轮暂停新增；关闭新增/修订后，实际使用回报仍可归档。','bbp-hint'));
@@ -362,7 +396,7 @@ export class Workbench {
         this.content.append(el('h3','进行中与待处理'));
         if(!a.jobs.length)this.content.append(el('p','当前没有排队或失败任务。','bbp-hint'));
         for(const {job:j,target} of a.jobs){const d=a.documentFor(target).data,card=this.section(label(j),(d.type==='story'?'故事：':'作者：')+d.title);
-            card.append(el('p',floorLabel(j.sources)+' · '+(j.state==='failed'?'失败':j.state==='held'?'等待手动运行':a.activeJob?.id===j.id?'处理中':'排队')+' · 尝试 '+j.attempts+' 次'+(j.error?' · '+j.error:'')),this.button('重试此任务',async()=>{const result=await a.retryJobs(j.id,target);this.render();return result;}));
+            card.append(el('p',(j.kind==='initialization'?'角色卡 / 世界书 / 已确认记忆；聊天来源仅作变更校验':floorLabel(j.sources))+' · '+(j.state==='failed'?'失败':j.state==='held'?'等待手动运行':a.activeJob?.id===j.id?'处理中':'排队')+' · 尝试 '+j.attempts+' 次'+(j.error?' · '+j.error:'')),this.button('重试此任务',async()=>{const result=await a.retryJobs(j.id,target);this.render();return result;}));
             const raw=el('pre');raw.hidden=true;card.append(this.button('查看本设备模型响应（含剧透）',async()=>{const result=await a.diagnostic(j.id,target);raw.textContent=result?.text??'本设备没有响应记录（请求可能尚未返回，或来自其他设备）';raw.hidden=false;}),raw);this.content.append(card);
         }
         this.content.append(el('h3','待审阅结果'),el('p','待审阅 '+a.proposals.length+' 项'));
@@ -383,6 +417,8 @@ export class Workbench {
     }
     settings(){
         const a=this.app,s=copy(a.settings),fields={};this.content.append(el('h2','设置'),el('p','连接、生成规则与资料联动统一在这里设置；保存后生效。','bbp-hint'));
+        const switches=this.section('正文注入','三个开关相互独立，可只开一个，也可组合或全部关闭。关闭后保留资料，并停止该类正文自动维护。');
+        for(const [k,label] of [['injectAuthor','注入作者'],['injectStory','注入故事'],['injectInspiration','注入灵感激发点']]){fields[k]=check(s[k]!==false);switches.append(field(label,fields[k]));}this.content.append(switches);
         const main=this.section('主 API · 初始化与故事核','提问、补问、建立故事核和常规修订故事核沿用酒馆当前主连接；剧情点评可单独选择 API，不需要在本插件重复填写地址或 Key。');
         main.append(this.button('测试主 API',()=>a.testConnection({...a.settings,connection:'main'})),el('p','测试只发送简短连接请求。主 API 达到等待时长后提示“响应较慢”，继续接收原结果；停止等待会保留输入，不强行中断酒馆请求。','bbp-hint'));this.content.append(main);
         const connection=this.section('点评处理连接','剧情默认主 API，写作默认副 API；已有写作连接设置保留。每条点评也可单独选择。初始化与普通修订故事核使用主 API。');
@@ -398,7 +434,7 @@ export class Workbench {
         const injection=this.section('旧大纲兼容注入','仅对尚未转换的旧大纲生效。新故事核与节点每轮提供，受总字符预算限制；灵感数量在故事→灵感激发点设置。');
         fields.outlineInjection=select([['requested','按需调用（默认）'],['full','完整注入（受总预算限制）']],s.outlineInjection??'requested');injection.append(field('大纲注入方式',fields.outlineInjection));
         number(injection,'outlineMaxEntries','按需调用单轮最多条数',1,12);number(injection,'outlineDirectoryChars','简短目录字符上限',300,6000);this.content.append(injection);
-        const memory=this.section('BB-Memory · 故事资料联动','只影响故事核；作者选择不跟随记忆存档切换。');
+        const memory=this.section('BB-Memory · 故事资料联动','初始化读取时间线、里程碑、永久记忆；其他资料只复用可验证的正常检索命中。未命中不全量塞入，不额外调用向量 API。作者选择不跟随记忆存档切换。');
         for(const [k,label] of [['memoryRead','允许读取已确认同故事的 BB-Memory'],['memoryFollow','跟随已映射的 BB-Memory 槽（默认关闭）']]){fields[k]=check(s[k]);memory.append(field(label,fields[k]));}
         if(a.story){const state=el('p'),show=()=>state.textContent=a.story.data.memoryBinding?`已确认槽：${a.story.data.memoryBinding.slotName}`:'尚无映射；不会读取其他故事';show();memory.append(state,this.button('确认当前两个存档属于同一故事',async()=>{await a.bindMemory();show();return '故事对应关系已保存；联动开关请点保存设置';}),this.button('解除此档映射',async()=>{await a.edit(a.story.data.id,d=>{d.memoryBinding=null;return d;});show();return '已解除映射；联动开关请点保存设置';}));}else memory.append(el('p','先在存档页加载大纲，再确认对应关系。'));this.content.append(memory);
         const budget=el('details','','bbp-card');budget.append(el('summary','上下文预算与等待时长'));
@@ -409,9 +445,9 @@ export class Workbench {
     }
     prompts(){
         const a=this.app;this.content.append(el('h2','全部提示词'),el('p','逐条展开后可编辑并保存。{{material}} 等占位符会填入本次资料；编辑不会解除保护或格式校验。提示词随账户保存，导出仅含提示词。'));
-        if(Object.keys(a.settings.prompts??{}).some(k=>['control','injection','initialization','outline','changeContract','plotFeedback'].includes(k)))this.content.append(el('p','已保留你的自定义正文提示词。v0.5.6 使用 version:3 故事节点与灵感协议。请对照默认值更新初始化、修订、JSON 格式、正文说明和尾部控制信息；旧协议无法维护灵感。','bbp-hint'));
+        if(Object.keys(a.settings.prompts??{}).some(k=>['control','injection','initialization','outline','changeContract','plotFeedback'].includes(k)))this.content.append(el('p','已保留你的自定义正文提示词。v0.5.7 使用 version:3 故事节点与灵感协议。请对照默认值更新初始化、修订、JSON 格式、正文说明和尾部控制信息；旧协议无法维护灵感。','bbp-hint'));
         const file=input('','file');file.accept='.json,application/json';
-        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.6.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
+        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.7.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
         const promptGroups=[['通用规则',['system','changeContract']],['初始化与故事核',['questions','replaceQuestions','appendQuestions','initialization','outline']],['划线评与正文',['feedback','plotFeedback','injection','control']],['连接与历史兼容',['connectionTest','legacyWorld','legacyReflection']]];
         for(const [title,keys] of promptGroups){const group=el('section','','bbp-prompt-group');group.append(el('h3',title));this.content.append(group);
         for(const key of keys){const entry=PROMPTS[key];
@@ -441,4 +477,4 @@ export class Workbench {
     }
     destroy(){this.destroyed=true;this.observer.disconnect();this.resizeObserver.disconnect();globalThis.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('scroll',this.onResize);document.removeEventListener('keydown',this.onKey);document.removeEventListener('pointerup',this.onSelection);this.app.listeners.delete(this.onChange);this.surface.remove();this.entry.remove();}
 }
-function floorLabel(sources){const floors=sources.map(s=>s.floor).filter(Number.isInteger);return floors.length?'第 '+[...new Set(floors)].join('、')+' 楼':'无聊天楼层';}
+function floorLabel(sources){const floors=[...new Set(sources.map(s=>s.floor).filter(Number.isInteger))].sort((a,b)=>a-b);return floors.length?'来源校验：'+(floors.length>6?`${floors[0]}—${floors.at(-1)} 楼，共 ${floors.length} 条`:floors.join('、')+' 楼'):'无聊天楼层';}

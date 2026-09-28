@@ -7,7 +7,7 @@ export const LEGACY_OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const OUTLINE_KINDS = ['storyline',...LEGACY_OUTLINE_KINDS];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, prompts:{} });
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, injectAuthor:true, injectStory:true, injectInspiration:true, prompts:{} });
 export function recordCounts(doc) {
     const counts={outline:0,writing:0,inspiration:0,reference:0,archived:0,total:doc.records.length};
     for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
@@ -91,6 +91,7 @@ export function validateSettings(s) {
     assert(s.plotConnection===undefined||['main','custom'].includes(s.plotConnection),'剧情点评连接无效');
     assert(s.feedbackThreshold===undefined||Number.isInteger(s.feedbackThreshold)&&s.feedbackThreshold>=1&&s.feedbackThreshold<=100,'点评总结阈值须为 1—100');
     assert(s.waitOutline===undefined||typeof s.waitOutline==='boolean','等待修订设置无效');
+    for(const k of ['injectAuthor','injectStory','injectInspiration'])assert(s[k]===undefined||typeof s[k]==='boolean','正文注入开关无效');
     assert(s.inspirationAiEnabled===undefined||typeof s.inspirationAiEnabled==='boolean','AI 灵感维护设置无效');
     for(const [k,min,max] of [['inspirationCapacity',1,200],['inspirationInjectCount',0,20]])assert(s[k]===undefined||Number.isInteger(s[k])&&s[k]>=min&&s[k]<=max,`${k} 超出范围 ${min}—${max}`);
     assert(s.outlineInjection===undefined||['requested','full'].includes(s.outlineInjection),'大纲注入方式无效');

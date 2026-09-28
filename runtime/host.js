@@ -82,8 +82,9 @@ export class TavernHost {
         const cards=group?c.characters.filter(x=>group.members?.includes(x.avatar)):[char].filter(Boolean);
         const sections=[],notes=[];
         const add=(label,value)=>{if(value)sections.push({label,text:typeof value==='string'?value:JSON.stringify(value)});};
-        for(const card of cards){const d=card.data??card;add('角色人设',{name:d.name,description:d.description,personality:d.personality,scenario:d.scenario});add('卡内世界书',d.character_book);}
-        add('用户人设',{name:c.name1,description:power.persona_description});
+        const bookText=entries=>entries.filter(e=>e.enabled!==false&&!e.disable).map(e=>[e.name??e.comment??'',e.content??''].filter(Boolean).join('\n')).join('\n\n');
+        for(const card of cards){const d=card.data??card;add('角色人设',[d.name,d.description,d.personality,d.scenario].filter(Boolean).join('\n'));if(d.character_book)add('卡内世界书',bookText(Object.values(d.character_book.entries??{})));}
+        add('用户人设',[c.name1,power.persona_description].filter(Boolean).join('\n'));
         const wi=this.worldModule,names=new Set([c.chatMetadata?.world_info,power.persona_description_lorebook,...(wi?.selected_world_info??[])]);
         for(const card of cards){names.add(card.data?.extensions?.world);const filename=card.avatar?.replace(/\.[^.]+$/,'');for(const name of wi?.world_info?.charLore?.find(x=>x.name===filename)?.extraBooks??[])names.add(name);}
         names.delete(undefined);names.delete('');names.delete(null);
@@ -92,7 +93,7 @@ export class TavernHost {
         for(const name of [...names].slice(0,32)){
             if(typeof name!=='string')continue;
             if(!loader){notes.push('当前版本缺少世界书读取能力');break;}
-            try{const book=await loader(name);if(!book){notes.push(`世界书读取失败：${name}`);continue;}add('世界书：'+name,Object.values(book.entries??{}).filter(e=>!e.disable&&e.enabled!==false).map(e=>({title:e.comment,keys:e.key,content:e.content})));}
+            try{const book=await loader(name);if(!book){notes.push(`世界书读取失败：${name}`);continue;}add('世界书：'+name,bookText(Object.values(book.entries??{})));}
             catch{notes.push(`世界书读取失败：${name}`);}
         }
         if(names.size>32)notes.push('世界书超过 32 本，本次只读取前 32 本');
@@ -130,7 +131,7 @@ export class TavernHost {
             assert(!this.isForeground()&&!this.rawPending,this.mainBusyReason());
             assert(typeof this.ctx().generateRaw==='function','当前酒馆没有 generateRaw');
             assert(!signal.aborted,'请求已取消');this.rawPending=true;this.rawStartedAt=Date.now();
-            const pending=Promise.resolve().then(()=>this.ctx().generateRaw({systemPrompt,prompt}));
+            const pending=Promise.resolve().then(()=>this.ctx().generateRaw({systemPrompt,prompt,trimNames:false,quietToLoud:false}));
             this.rawCompletion=pending.catch(()=>{});
             pending.finally(()=>{this.rawPending=false;this.rawStartedAt=null;}).catch(()=>{});
             // Do not call stopGeneration: it can stop the user's RP. Late results are ignored.
@@ -155,11 +156,20 @@ export class TavernHost {
         if(!binding?.slotName)return null;
         const lf=c.libs?.localforage??globalThis.SillyTavern?.libs?.localforage;if(!lf)return null;
         // Only these version-observed storage keys; no mutation or guessed last-used slot.
-        const slot=await lf.getItem(`bb_memory_slot_${character}_${binding.slotName}`);
+        const raw=await lf.getItem(`bb_memory_slot_${character}_${binding.slotName}`);
+        const slot=raw?.schema==='bb-memory-vector-ref-v1'?raw.data:raw;
+        assert(this.identity().character===character&&this.identity().chat===chat&&this.ctx().extensionSettings?.bb_memory?.chatSlotBindings?.entries?.[character]?.[chat]?.slotName===binding.slotName,'读取 BB-Memory 期间存档已切换，请重试');
         if(!slot)return null;
         const stamp=slot._slotCreatedAt;
         if(!stamp)return {available:false,reason:'当前 BB-Memory 存档缺少可验证的创建标识，暂不联动'};
-        return {available:true,character,slotName:binding.slotName,stamp:String(stamp),signature:JSON.stringify([character,binding.slotName,String(stamp)]),data:slot};
+        return {available:true,character,slotName:binding.slotName,stamp:String(stamp),signature:JSON.stringify([character,binding.slotName,String(stamp)]),bindingAt:binding.updatedAt,data:slot};
+    }
+    memoryRetrieval(snapshot){
+        let result;try{result=globalThis.bbMemoryDebug?.lastRetrievalResult?.();}catch{return null;}
+        const bindingAt=Number(snapshot.bindingAt),createdAt=Number(snapshot.stamp);
+        // Same chat alone is insufficient after switching slots. Unknown timestamps disable reuse.
+        if(!result||String(result.chatId)!==this.identity().chat||!Number.isFinite(bindingAt)||!Number.isFinite(createdAt)||!Number.isFinite(result.timestamp)||result.timestamp<Math.max(bindingAt,createdAt))return null;
+        return copy(result);
     }
     destroy(){this.disposers.forEach(fn=>fn());this.controlFilter(false);this.inject('');}
 }

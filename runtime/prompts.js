@@ -20,6 +20,7 @@ export function parseChanges(raw) {
 export function maintenanceMaterial(job,story,profile) {
     const budget=profile.settings.maxInputChars;
     const data={current:[],globalGuidelines:[],feedback:job.feedback??[],input:job.input??'',signal:job.signal??null,omitted:0};
+    if(['initialization','outline'].includes(job.kind))try{const input=JSON.parse(data.input);if(input.version===2)data.input=input;}catch{/* Preserve legacy text inputs. */}
     assert(JSON.stringify(data).length<=budget-100,'本次输入超过材料预算；全文已保留，请提高预算或减小批次后重试');
     const targets=new Set(job.signal?.ids??[]),related=new Set(story.records.filter(r=>targets.has(r.id)).flatMap(r=>r.links??[]));
     const current=story.records.filter(r=>r.status==='active'&&!story.excluded.includes(r.id)).map((r,i)=>({r,i,score:(targets.has(r.id)?100:0)+(r.kind==='core'?80:0)+(related.has(r.id)?60:0)+(r.locked?2:0)})).sort((a,b)=>b.score-a.score||b.i-a.i).map(x=>x.r);
@@ -33,33 +34,34 @@ export function maintenancePrompt(job,story,profile,material=maintenanceMaterial
     return promptText(profile.settings,key,{contract:promptText(profile.settings,'changeContract'),material:JSON.stringify(material)});
 }
 export function injection(profile,story,settings,context={sources:[],rows:[],chatKey:''},token='') {
+    const features={author:settings.injectAuthor!==false,story:settings.injectStory!==false,inspiration:settings.injectInspiration!==false};
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
-    const selection=chooseOutline(story,context,settings),selected=[],directory=[],used=[];
+    const selection=chooseOutline(features.story?story:{...story,records:[],controls:[]},context,settings),selected=[],directory=[],used=[];
     const data={author:profile.title,chapter:selection.state.chapter,core:[],outlines:[],guidelines:[],directory,reference:[],lines:[],inspirations:[]};
     const room=inspirationRoom(story,settings,context);
-    const control=token&&story.id!=='unbound'?promptText(settings,'control',{token,maxEntries:settings.outlineMaxEntries??3}):'';
+    const control=token&&story.id!=='unbound'&&(features.story||features.inspiration)?promptText(settings,'control',{token,maxEntries:settings.outlineMaxEntries??3}):'';
     // Escape markup delimiters in data so pasted quotes cannot close our wrappers.
     const json=value=>JSON.stringify(value).replaceAll('<','\\u003c').replaceAll('>','\\u003e');
     const parts=()=>({writer:`<BBPresets_WritingGuidelines>\n${json({author:data.author,guidelines:data.guidelines})}\n</BBPresets_WritingGuidelines>`,outline:`<BBPresets_Outline>\n${json({chapter:data.chapter,core:data.core,outlines:data.outlines,directory,reference:data.reference})}\n</BBPresets_Outline>`});
-    const render=()=>{const p=parts();const modern=`<BBPresets_StoryCore>\n${json({lines:data.lines})}\n</BBPresets_StoryCore>\n<BBPresets_Inspiration>\n${json({items:data.inspirations,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`;return promptText(settings,'injection',{material:p.writer+'\n'+modern+(selection.active.length||data.reference.length?'\n'+p.outline:'')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:'');};
+    const render=()=>{const p=parts(),chunks=[];if(features.author)chunks.push(p.writer);if(features.story){chunks.push(`<BBPresets_StoryCore>\n${json({lines:data.lines})}\n</BBPresets_StoryCore>`);if(selection.active.length||data.reference.length)chunks.push(p.outline);}if(features.inspiration)chunks.push(`<BBPresets_Inspiration>\n${json({items:data.inspirations,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`);if(!chunks.length)return '';return promptText(settings,'injection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${json({storyEnabled:features.story,inspirationEnabled:features.inspiration})}\n${control}\n</BBPresets_ControlInstructions>`:'');};
     const fits=()=>render().length<=settings.injectionChars;
     const budget=settings.injectionChars-render().length;
     assert(fits(),'正文注入预算不足以包含当前要求和控制协议，请提高预算后重试');
     let omitted=selection.limited;
     const add=(target,value)=>{target.push(value);if(!fits()){target.pop();omitted++;return false;}return true;};
     const view=r=>({id:r.id,title:r.title,truth:r.truth,text:r.blocks.map(b=>b.text).join(r.joiner??'\n\n')});
-    for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))if(add(data.guidelines,view(r)))used.push(r.id);
-    for(const r of active(story).filter(r=>r.kind==='storyline'))if(add(data.lines,{id:r.id,title:r.title,core:storyText(r),nextNode:r.nextNode,locked:r.locked}))used.push(r.id);
+    if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))if(add(data.guidelines,view(r)))used.push(r.id);
+    if(features.story)for(const r of active(story).filter(r=>r.kind==='storyline'))if(add(data.lines,{id:r.id,title:r.title,core:storyText(r),nextNode:r.nextNode,locked:r.locked}))used.push(r.id);
     // User wishes first, then oldest pending materials. Unused items stay pending; no forced expiry.
     const inspirations=active(story).filter(r=>r.kind==='inspiration').sort((a,b)=>Number(b.creator==='user')-Number(a.creator==='user'));
-    for(const r of inspirations){if(data.inspirations.length>=(settings.inspirationInjectCount??3))break;if(add(data.inspirations,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)}))used.push(r.id);}
+    if(features.inspiration)for(const r of inspirations){if(data.inspirations.length>=(settings.inspirationInjectCount??3))break;if(add(data.inspirations,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)}))used.push(r.id);}
     for(const r of selection.records)if(add(r.kind==='core'?data.core:data.outlines,view(r)))used.push(r.id);
     const directoryBudget=Math.min(settings.outlineDirectoryChars??1200,Math.max(0,Math.floor(budget*.25)));let dirChars=2;
     for(const r of selection.directory){const entry={id:r.id,kind:r.kind,title:r.title.slice(0,80),summary:(r.summary??'').slice(0,80)};const size=json(entry).length+1;if(dirChars+size>directoryBudget){omitted++;continue;}if(add(directory,entry)){dirChars+=size;selected.push(r.id);}}
     // Legacy world records remain stored, but are not silently injected in on-demand mode.
-    if(settings.outlineInjection==='full'&&!story.records.some(r=>r.kind==='storyline'))for(const r of active(story).filter(r=>r.kind==='world'))if(add(data.reference,view(r)))used.push(r.id);
+    if(features.story&&settings.outlineInjection==='full'&&!story.records.some(r=>r.kind==='storyline'))for(const r of active(story).filter(r=>r.kind==='world'))if(add(data.reference,view(r)))used.push(r.id);
     const lineIds=data.lines.map(r=>r.id),inspirationIds=data.inspirations.map(r=>r.id);
     const visibleIds=[...new Set([...selected,...(data.chapter?.lineIds??[]),...lineIds,...used.filter(id=>selection.active.some(r=>r.id===id))])];
-    return {text:render(),omitted,visibleIds,lineIds,inspirationIds,recordIds:used,counts:{outline:data.lines.length+data.core.length+data.outlines.length,writing:data.guidelines.length,directory:directory.length,inspiration:data.inspirations.length},state:selection.state,controlEnabled:Boolean(control)};
+    return {text:render(),features,omitted,visibleIds,lineIds,inspirationIds,recordIds:used,counts:{outline:data.lines.length+data.core.length+data.outlines.length,writing:data.guidelines.length,directory:directory.length,inspiration:data.inspirations.length},state:selection.state,controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;delete r.creator;r.blocks.forEach(b=>delete b.locked);return r;}

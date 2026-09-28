@@ -29,6 +29,8 @@ export function inspirationRoom(story,settings,context){
 
 // Produce ordinary audited record changes so swipe, deletion and branches can undo them.
 export function storyControlChanges(story,control,settings,context){
+    assert(settings.injectStory!==false||!control.nodes.length&&!control.revise,'故事注入已关闭，拒绝故事更新');
+    assert(settings.injectInspiration!==false||!control.inspiration.add.length&&!control.inspiration.update.length&&!control.inspiration.usedIds.length,'灵感注入已关闭，拒绝灵感更新');
     const changes=[],addedInspirationIds=[],usedInspirationIds=[],updatedNodeIds=[],skipped=[];
     const view=r=>{const next=copy(r);for(const key of ['locked','origin','sources','joiner','creator'])delete next[key];for(const b of next.blocks)delete b.locked;return next;};
     const find=(id,kind)=>{const r=story.records.find(r=>r.id===id&&r.kind===kind&&r.status==='active'&&!story.excluded.includes(id));assert(r,'本轮条目已变化，请重新生成');return r;};
