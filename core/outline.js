@@ -12,9 +12,10 @@ export function parseControl(text,token,visibleIds,storyVisibility={}) {
     const parts=[...String(text).matchAll(/\[BBP_CONTROL\]([\s\S]*?)\[\/BBP_CONTROL\]/g)];
     // Continue appends to the stored message: older, already-consumed blocks may precede this one.
     const matching=parts.filter(part=>{try{return parseModelJSON(part[1]).token===token;}catch{return false;}});
-    assert(matching.length===1,'本轮未返回完整且唯一的控制信息，大纲保持不变');
+    assert(matching.length===1,'本轮未返回完整且唯一的控制信息，资料保持不变');
     const match=matching[0];assert(!text.slice(match.index+match[0].length).trim(),'控制信息必须位于正文末尾');
     const data=parseModelJSON(match[1],'正文控制信息');
+    if(data.version===4){assert(Object.keys(data).every(k=>['version','token','inspiration'].includes(k)),'灵感控制包含废案字段');validateStoryControl({...data,version:3,nodes:[],revise:null},{...storyVisibility,visibleIds:new Set()});return {...data,nodes:[],revise:null};}
     if(data.version===3){assert(data.token===token,'控制信息本轮标识不符');return validateStoryControl(data,{...storyVisibility,visibleIds});}
     const only=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(k=>keys.includes(k));
     assert(only(data,['version','token','chapter','nextIds','revise'])&&[1,2].includes(data.version)&&data.token===token,'控制信息版本或本轮标识不符');

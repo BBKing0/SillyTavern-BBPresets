@@ -1,7 +1,6 @@
 import {assert,copy} from '../core/model.js';
 import {parseModelJSON} from '../core/json.js';
 import {PROMPTS,promptText} from '../core/prompt-templates.js';
-import {chooseOutline} from '../core/outline.js';
 import {inspirationRoom,storyText} from '../core/story.js';
 
 export const INITIALIZATION_TEMPLATE=PROMPTS.questions.text;
@@ -23,45 +22,35 @@ export function maintenanceMaterial(job,story,profile) {
     if(['initialization','outline'].includes(job.kind))try{const input=JSON.parse(data.input);if(input.version===2)data.input=input;}catch{/* Preserve legacy text inputs. */}
     assert(JSON.stringify(data).length<=budget-100,'本次输入超过材料预算；全文已保留，请提高预算或减小批次后重试');
     const targets=new Set(job.signal?.ids??[]),related=new Set(story.records.filter(r=>targets.has(r.id)).flatMap(r=>r.links??[]));
-    const current=story.records.filter(r=>r.status==='active'&&!story.excluded.includes(r.id)).map((r,i)=>({r,i,score:(targets.has(r.id)?100:0)+(r.kind==='core'?80:0)+(related.has(r.id)?60:0)+(r.locked?2:0)})).sort((a,b)=>b.score-a.score||b.i-a.i).map(x=>x.r);
+    const current=story.records.filter(r=>(job.kind!=='feedback'||['guide','focus','experience'].includes(r.kind))&&r.status==='active'&&!story.excluded.includes(r.id)).map((r,i)=>({r,i,score:(targets.has(r.id)?100:0)+(r.kind==='core'?80:0)+(related.has(r.id)?60:0)+(r.locked?2:0)})).sort((a,b)=>b.score-a.score||b.i-a.i).map(x=>x.r);
     const view=r=>{const v=copy(r);delete v.sources;return v;};
     for(const [target,records] of [[data.current,current],[data.globalGuidelines,job.kind==='feedback'?[]:profile.records.filter(r=>r.status==='active'&&!profile.excluded.includes(r.id))]])for(const r of records){target.push(view(r));if(JSON.stringify(data).length>budget-40){target.pop();data.omitted++;}}
     assert([...targets].every(id=>data.current.some(r=>r.id===id)),'待修改大纲未能完整放入预算，任务保留；请提高材料预算后重试');
     return data;
 }
 export function maintenancePrompt(job,story,profile,material=maintenanceMaterial(job,story,profile)) {
-    const key=job.kind==='outline'&&job.feedback?.some(f=>f.category==='plot')?'plotFeedback':{world:'legacyWorld',reflection:'legacyReflection',feedback:'feedback',initialization:'initialization',outline:'outline'}[job.kind];
-    return promptText(profile.settings,key,{contract:promptText(profile.settings,'changeContract'),material:JSON.stringify(material)});
+    const key=job.kind==='feedback'&&job.feedback?.some(f=>f.category==='plot')?'plotAuthorFeedback':job.kind==='outline'&&job.feedback?.some(f=>f.category==='plot')?'plotFeedback':{world:'legacyWorld',reflection:'legacyReflection',feedback:'feedback',initialization:'initialization',outline:'outline'}[job.kind];
+    return promptText(profile.settings,key,{contract:promptText(profile.settings,job.kind==='feedback'?'authorContract':'changeContract'),material:JSON.stringify(material)});
 }
-export function injection(profile,story,settings,context={sources:[],rows:[],chatKey:''},token='') {
-    const features={author:settings.injectAuthor!==false,story:settings.injectStory!==false,inspiration:settings.injectInspiration!==false};
+export function injection(profile,inspiration,settings,context={sources:[],rows:[],chatKey:''},token='') {
+    const features={author:settings.injectAuthor!==false,story:false,inspiration:settings.injectInspiration!==false};
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
-    const selection=chooseOutline(features.story?story:{...story,records:[],controls:[]},context,settings),selected=[],directory=[],used=[];
-    const data={author:profile.title,chapter:selection.state.chapter,core:[],outlines:[],guidelines:[],directory,reference:[],lines:[],inspirations:[]};
-    const room=inspirationRoom(story,settings,context);
-    const control=token&&story.id!=='unbound'&&(features.story||features.inspiration)?promptText(settings,'control',{token,maxEntries:settings.outlineMaxEntries??3}):'';
-    // Escape markup delimiters in data so pasted quotes cannot close our wrappers.
+    // Only an independently selected inspiration archive can participate in generation.
+    const doc=inspiration?.type==='inspiration'?inspiration:{records:[],excluded:[],controls:[]};
+    const guidelines=[],items=[],used=[],room=inspirationRoom(doc,settings,context);
+    const control=token&&inspiration?.type==='inspiration'&&features.inspiration?promptText(settings,'inspirationControl',{token}):'';
     const json=value=>JSON.stringify(value).replaceAll('<','\\u003c').replaceAll('>','\\u003e');
-    const parts=()=>({writer:`<BBPresets_WritingGuidelines>\n${json({author:data.author,guidelines:data.guidelines})}\n</BBPresets_WritingGuidelines>`,outline:`<BBPresets_Outline>\n${json({chapter:data.chapter,core:data.core,outlines:data.outlines,directory,reference:data.reference})}\n</BBPresets_Outline>`});
-    const render=()=>{const p=parts(),chunks=[];if(features.author)chunks.push(p.writer);if(features.story){chunks.push(`<BBPresets_StoryCore>\n${json({lines:data.lines})}\n</BBPresets_StoryCore>`);if(selection.active.length||data.reference.length)chunks.push(p.outline);}if(features.inspiration)chunks.push(`<BBPresets_Inspiration>\n${json({items:data.inspirations,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`);if(!chunks.length)return '';return promptText(settings,'injection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${json({storyEnabled:features.story,inspirationEnabled:features.inspiration})}\n${control}\n</BBPresets_ControlInstructions>`:'');};
-    const fits=()=>render().length<=settings.injectionChars;
-    const budget=settings.injectionChars-render().length;
-    assert(fits(),'正文注入预算不足以包含当前要求和控制协议，请提高预算后重试');
-    let omitted=selection.limited;
-    const add=(target,value)=>{target.push(value);if(!fits()){target.pop();omitted++;return false;}return true;};
-    const view=r=>({id:r.id,title:r.title,truth:r.truth,text:r.blocks.map(b=>b.text).join(r.joiner??'\n\n')});
-    if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))if(add(data.guidelines,view(r)))used.push(r.id);
-    if(features.story)for(const r of active(story).filter(r=>r.kind==='storyline'))if(add(data.lines,{id:r.id,title:r.title,core:storyText(r),nextNode:r.nextNode,locked:r.locked}))used.push(r.id);
-    // User wishes first, then oldest pending materials. Unused items stay pending; no forced expiry.
-    const inspirations=active(story).filter(r=>r.kind==='inspiration').sort((a,b)=>Number(b.creator==='user')-Number(a.creator==='user'));
-    if(features.inspiration)for(const r of inspirations){if(data.inspirations.length>=(settings.inspirationInjectCount??3))break;if(add(data.inspirations,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)}))used.push(r.id);}
-    for(const r of selection.records)if(add(r.kind==='core'?data.core:data.outlines,view(r)))used.push(r.id);
-    const directoryBudget=Math.min(settings.outlineDirectoryChars??1200,Math.max(0,Math.floor(budget*.25)));let dirChars=2;
-    for(const r of selection.directory){const entry={id:r.id,kind:r.kind,title:r.title.slice(0,80),summary:(r.summary??'').slice(0,80)};const size=json(entry).length+1;if(dirChars+size>directoryBudget){omitted++;continue;}if(add(directory,entry)){dirChars+=size;selected.push(r.id);}}
-    // Legacy world records remain stored, but are not silently injected in on-demand mode.
-    if(features.story&&settings.outlineInjection==='full'&&!story.records.some(r=>r.kind==='storyline'))for(const r of active(story).filter(r=>r.kind==='world'))if(add(data.reference,view(r)))used.push(r.id);
-    const lineIds=data.lines.map(r=>r.id),inspirationIds=data.inspirations.map(r=>r.id);
-    const visibleIds=[...new Set([...selected,...(data.chapter?.lineIds??[]),...lineIds,...used.filter(id=>selection.active.some(r=>r.id===id))])];
-    return {text:render(),features,omitted,visibleIds,lineIds,inspirationIds,recordIds:used,counts:{outline:data.lines.length+data.core.length+data.outlines.length,writing:data.guidelines.length,directory:directory.length,inspiration:data.inspirations.length},state:selection.state,controlEnabled:Boolean(control)};
+    const render=()=>{
+        const chunks=[];
+        if(features.author)chunks.push(`<BBPresets_WritingGuidelines>\n${json({author:profile.title,guidelines})}\n</BBPresets_WritingGuidelines>`);
+        if(features.inspiration)chunks.push(`<BBPresets_Inspiration>\n${json({items,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`);
+        return chunks.length?promptText(settings,'inspirationInjection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:''):'';
+    };
+    assert(render().length<=settings.injectionChars,'正文注入预算不足以包含说明和灵感协议，请提高预算');
+    let omitted=0;
+    const add=(list,item)=>{list.push(item);if(render().length>settings.injectionChars){list.pop();omitted++;return false;}used.push(item.id);return true;};
+    if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))add(guidelines,{id:r.id,title:r.title,truth:r.truth,text:storyText(r)});
+    if(features.inspiration)for(const r of active(doc).sort((a,b)=>Number(b.creator==='user')-Number(a.creator==='user'))){if(items.length>=(settings.inspirationInjectCount??3))break;add(items,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)});}
+    return {text:render(),features,omitted,visibleIds:[],lineIds:[],inspirationIds:items.map(r=>r.id),recordIds:used,counts:{outline:0,writing:guidelines.length,directory:0,inspiration:items.length},controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;delete r.creator;r.blocks.forEach(b=>delete b.locked);return r;}

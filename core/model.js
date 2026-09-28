@@ -7,7 +7,7 @@ export const LEGACY_OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const OUTLINE_KINDS = ['storyline',...LEGACY_OUTLINE_KINDS];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, injectAuthor:true, injectStory:true, injectInspiration:true, prompts:{} });
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, injectAuthor:true, injectStory:false, injectInspiration:true, prompts:{} });
 export function recordCounts(doc) {
     const counts={outline:0,writing:0,inspiration:0,reference:0,archived:0,total:doc.records.length};
     for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
@@ -44,9 +44,12 @@ export function validateRecord(r) {
     return r;
 }
 export function validateDocument(doc) {
-    assert(doc && doc.schema === SCHEMA && ['profile', 'story','author'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
-    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId','chatBindings','activity']);
+    assert(doc && doc.schema === SCHEMA && ['profile', 'story','author','inspiration'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
+    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId','chatBindings','activity','activeInspirationId','legacySourceId']);
     if(doc.chatBindings!==undefined){assert(doc.type==='profile'&&Array.isArray(doc.chatBindings)&&doc.chatBindings.length<=5000,'聊天绑定列表无效');const chats=new Set();for(const b of doc.chatBindings){assert(b&&text(b.chatKey,500)&&b.chatKey&&validId(b.storyId)&&!chats.has(b.chatKey),'聊天绑定无效或重复');chats.add(b.chatKey);}}
+    assert(doc.activeInspirationId===undefined||doc.type==='profile'&&validId(doc.activeInspirationId),'当前灵感身份无效');
+    assert(doc.legacySourceId===undefined||doc.type==='inspiration'&&validId(doc.legacySourceId),'旧灵感来源无效');
+    if(doc.type==='inspiration')assert(doc.records.every(r=>r.kind==='inspiration'),'灵感档只能保存灵感');
     assert(doc.activeAuthorId===undefined||doc.type==='profile'&&validId(doc.activeAuthorId),'当前作者身份无效');
     if(doc.type==='author')assert(doc.records.every(r=>AUTHOR_KINDS.includes(r.kind)),'作者只能保存写作偏好与经验');
     assert(doc.authorVersion===undefined||doc.authorVersion===5,'作者资料版本不支持');
@@ -62,21 +65,21 @@ export function validateDocument(doc) {
     for (const f of doc.feedback) {
         assert(f.category===undefined||['plot','writing'].includes(f.category),'点评分类无效');
         assert(f.connection===undefined||['main','custom'].includes(f.connection),'点评连接无效');
-        assert(f.category!=='plot'||doc.type==='story'&&text(f.chatKey,500),'剧情点评必须属于故事和聊天');
+        assert(f.category!=='plot'||['story','author','profile'].includes(doc.type)&&text(f.chatKey,500),'剧情点评须属于作者或旧故事并保留聊天标识');
     }
     const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
-    if(doc.activity!==undefined){assert(doc.type==='story'&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
+    if(doc.activity!==undefined){assert(['story','inspiration'].includes(doc.type)&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
-    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2,3].includes(a.controlVersion),'最近状况协议版本无效');
-    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2,3].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
-    for(const c of doc.controls??[])if(c.version===3){assert(c.chapter===null&&c.nextIds.length===0,'新版控制不使用章节或选条');for(const key of ['addedInspirationIds','usedInspirationIds','updatedNodeIds'])assert(Array.isArray(c[key])&&c[key].length<=20&&c[key].every(validId),'故事控制回执无效');}
+    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2,3,4].includes(a.controlVersion),'最近状况协议版本无效');
+    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2,3,4].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
+    for(const c of doc.controls??[])if([3,4].includes(c.version)){assert(c.chapter===null&&c.nextIds.length===0,'新版控制不使用章节或选条');for(const key of ['addedInspirationIds','usedInspirationIds','updatedNodeIds'])assert(Array.isArray(c[key])&&c[key].length<=20&&c[key].every(validId),'故事控制回执无效');}
     for(const f of doc.feedback)assert(!f.source||source(f.source),'点评来源无效');
     assert(doc.processed.every(x=>text(x,300))&&doc.excluded.every(validId),'处理记录或排除列表无效');
     for(const h of doc.history){
         assert(h&&validId(h.id)&&text(h.key,300)&&['user','ai','system'].includes(h.actor)&&Array.isArray(h.sources)&&h.sources.every(source)&&Array.isArray(h.changes),'历史变更格式无效');
         assert(!h.anchor||source(h.anchor),'历史锚点无效');
         assert(!h.feedbackIds||Array.isArray(h.feedbackIds)&&h.feedbackIds.every(validId),'历史点评依据无效');
-        for(const c of h.changes){assert(c&&validId(c.id),'历史条目身份无效');for(const r of [c.before,c.after])if(r){validateRecord(r);assert(r.id===c.id,'历史条目归属不符');}}
+        for(const c of h.changes){assert(c&&validId(c.id),'历史条目身份无效');if(doc.type==='inspiration')assert([c.before,c.after].every(r=>!r||r.kind==='inspiration'),'灵感历史不能包含其他类别');for(const r of [c.before,c.after])if(r){validateRecord(r);assert(r.id===c.id,'历史条目归属不符');}}
     }
     for(const j of [...doc.jobs,...doc.proposals])assert(j&&validId(j.id)&&text(j.key,300)&&['world','feedback','reflection','initialization','outline'].includes(j.kind)&&text(j.chatKey,500)&&text(j.input,150000)&&Array.isArray(j.sources)&&j.sources.every(source)&&Array.isArray(j.feedback)&&j.feedback.every(f=>text(f.note)),'维护任务格式无效');
     for(const j of [...doc.jobs,...doc.proposals])assert(j.connection===undefined||['main','custom'].includes(j.connection),'任务连接无效');
@@ -134,6 +137,7 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
     validateDocument(doc);
     assert(Array.isArray(changes) && changes.length <= 100, '一次最多 100 个变更');
     if (doc.processed.includes(key)) return copy(doc);
+    if(doc.type==='inspiration')assert(changes.every(c=>c.op==='put'?c.record?.kind==='inspiration':doc.records.find(r=>r.id===c.id)?.kind==='inspiration'),'灵感档不能修改其他类别');
     const next = copy(doc), diffs = [], seen = new Set();
     for (const change of changes) {
         assert(change && ['put','remove'].includes(change.op), '不支持的操作');
