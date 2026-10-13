@@ -6,11 +6,11 @@ export const SCHEMA = 1;
 export const LEGACY_OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const OUTLINE_KINDS = ['storyline',...LEGACY_OUTLINE_KINDS];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
-export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'world', 'guide', 'focus', 'experience'];
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, injectAuthor:true, injectStory:false, injectInspiration:true, prompts:{} });
+export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'worldTask', 'world', 'guide', 'focus', 'experience'];
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, inspirationConnection:'main', worldTaskCapacity:5, worldTaskConnection:'main', worldTaskAiEnabled:false, worldTaskRecognition:'delayed', worldTaskView:'safe', injectWorldTask:true, injectAuthor:true, injectStory:false, injectInspiration:true, prompts:{} });
 export function recordCounts(doc) {
-    const counts={outline:0,writing:0,inspiration:0,reference:0,archived:0,total:doc.records.length};
-    for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
+    const counts={outline:0,writing:0,inspiration:0,worldTask:0,reference:0,archived:0,total:doc.records.length};
+    for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':r.kind==='worldTask'?'worldTask':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
     return counts;
 }
 export const copy = value => structuredClone(value);
@@ -19,12 +19,13 @@ export const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export function assert(condition, message) { if (!condition) throw new Error(message); }
 export async function hash(text) {const bytes=new TextEncoder().encode(text);return globalThis.crypto?.subtle?[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join(''):sha256(bytes);}
 const text = (value, max = 16000) => typeof value === 'string' && value.length <= max;
+const validPrefix = value => typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 export function validId(id) { return typeof id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(id) && !['__proto__','prototype','constructor'].includes(id); }
 function keys(value, allowed) { assert(Object.keys(value).every(k=>allowed.includes(k)), '包含不支持的字段'); }
 export function validateRecord(r) {
     assert(r && validId(r.id) && KINDS.includes(r.kind), '条目身份或类别无效');
     keys(r,['id','kind','title','blocks','locked','truth','status','importance','origin','sources','joiner','keywords','summary','links','nextNode','creator']);
-    assert(r.nextNode===undefined||r.kind==='storyline'&&text(r.nextNode,500),'下一个节点格式无效或超过 500 字符');
+    assert(r.nextNode===undefined||['storyline','worldTask'].includes(r.kind)&&text(r.nextNode,500),'下一个节点格式无效或超过 500 字符');
     assert(r.creator===undefined||r.kind==='inspiration'&&['user','ai'].includes(r.creator),'灵感来源无效');
     assert(r.summary===undefined||text(r.summary,500),'条目摘要过长');
     assert(r.keywords===undefined||(Array.isArray(r.keywords)&&r.keywords.length<=30&&r.keywords.every(k=>text(k,100)&&k.trim())),'关键词格式无效');
@@ -34,19 +35,30 @@ export function validateRecord(r) {
     assert(['plan', 'intent', 'event', 'guidance'].includes(r.truth), '事实状态无效');
     assert(['active', 'archived'].includes(r.status), '条目状态无效');
     assert(['minor', 'major'].includes(r.importance), '重要程度无效');
-    assert(['manual', 'world', 'feedback', 'reflection', 'initialization','outline','storycontrol'].includes(r.origin), '条目来源类别无效');
-    assert(Array.isArray(r.sources) && r.sources.length <= 5000 && r.sources.every(s => text(s.chatKey, 500) && validId(s.id) && text(s.hash, 100)), '来源无效');
+    assert(['manual', 'world', 'feedback', 'reflection', 'initialization','outline','storycontrol','worldTask','inspirationPlan'].includes(r.origin), '条目来源类别无效');
+    assert(Array.isArray(r.sources) && r.sources.length <= 5000 && r.sources.every(s => text(s.chatKey, 500) && validId(s.id) && text(s.hash, 100)&&(s.prefixHash===undefined||validPrefix(s.prefixHash))), '来源无效');
     assert(Array.isArray(r.blocks) && r.blocks.length > 0 && r.blocks.length <= 100, '文字段落数量无效');
     const ids = new Set();
     for (const b of r.blocks) { keys(b,['id','text','locked']); assert(validId(b.id) && !ids.has(b.id) && text(b.text,150000) && typeof b.locked === 'boolean', '文字段落无效'); ids.add(b.id); }
     if(r.kind==='storyline')assert(text(r.nextNode,500)&&r.blocks.map(b=>b.text).join(r.joiner??'\n\n').trim()&&r.blocks.reduce((n,b)=>n+b.text.length,0)<=500,'故事核须简短且非空（最多 500 字符），并包含下一个节点');
     if(r.kind==='inspiration')assert(r.blocks.map(b=>b.text).join('').trim()&&r.blocks.reduce((n,b)=>n+b.text.length,0)<=1000&&['user','ai'].includes(r.creator),'灵感须非空且不超过 1000 字符');
+    if(r.kind==='worldTask')assert(r.truth==='plan'&&text(r.summary,500)&&text(r.nextNode,500)&&r.blocks.map(b=>b.text).join('').trim()&&r.blocks.reduce((n,b)=>n+b.text.length,0)<=12000,'世界任务须包含简介、下一阶段与非空主体（最多 12000 字符），并明确属于创作计划');
     return r;
 }
 export function validateDocument(doc) {
-    assert(doc && doc.schema === SCHEMA && ['profile', 'story','author','inspiration'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
-    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId','chatBindings','activity','activeInspirationId','legacySourceId']);
+    assert(doc && doc.schema === SCHEMA && ['profile', 'story','author','inspiration','worldTask'].includes(doc.type) && validId(doc.id), '不是支持的 BBPresets 文档');
+    keys(doc,['schema','type','id','title','records','history','feedback','proposals','processed','conflicts','excluded','jobs','settings','bindings','memoryBinding','parent','initializationDrafts','manualSavedAt','authorVersion','controls','retiredTasks','activeAuthorId','chatBindings','activity','activeInspirationId','legacySourceId','activeWorldTaskId','memoryArchiveBindings']);
     if(doc.chatBindings!==undefined){assert(doc.type==='profile'&&Array.isArray(doc.chatBindings)&&doc.chatBindings.length<=5000,'聊天绑定列表无效');const chats=new Set();for(const b of doc.chatBindings){assert(b&&text(b.chatKey,500)&&b.chatKey&&validId(b.storyId)&&!chats.has(b.chatKey),'聊天绑定无效或重复');chats.add(b.chatKey);}}
+    assert(doc.activeWorldTaskId===undefined||doc.type==='profile'&&validId(doc.activeWorldTaskId),'当前世界任务身份无效');
+    if(doc.memoryArchiveBindings!==undefined){
+        assert(doc.type==='profile'&&Array.isArray(doc.memoryArchiveBindings)&&doc.memoryArchiveBindings.length<=5000,'记忆存档绑定列表无效');
+        const signatures=new Set();
+        for(const b of doc.memoryArchiveBindings){
+            assert(b&&typeof b==='object'&&!Array.isArray(b),'记忆存档绑定无效');keys(b,['signature','inspirationId','worldTaskId','name','at']);
+            assert(text(b.signature,500)&&b.signature.trim()&&!signatures.has(b.signature)&&(b.inspirationId===undefined||validId(b.inspirationId))&&(b.worldTaskId===undefined||validId(b.worldTaskId))&&(b.inspirationId||b.worldTaskId)&&(b.name===undefined||text(b.name,300))&&(b.at===undefined||Number.isFinite(b.at)),'记忆存档绑定身份无效或重复');signatures.add(b.signature);
+        }
+    }
+    if(doc.type==='worldTask')assert(doc.records.every(r=>r.kind==='worldTask'),'世界任务档只能保存世界任务');
     assert(doc.activeInspirationId===undefined||doc.type==='profile'&&validId(doc.activeInspirationId),'当前灵感身份无效');
     assert(doc.legacySourceId===undefined||doc.type==='inspiration'&&validId(doc.legacySourceId),'旧灵感来源无效');
     if(doc.type==='inspiration')assert(doc.records.every(r=>r.kind==='inspiration'),'灵感档只能保存灵感');
@@ -67,21 +79,31 @@ export function validateDocument(doc) {
         assert(f.connection===undefined||['main','custom'].includes(f.connection),'点评连接无效');
         assert(f.category!=='plot'||['story','author','profile'].includes(doc.type)&&text(f.chatKey,500),'剧情点评须属于作者或旧故事并保留聊天标识');
     }
-    const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100);
-    if(doc.activity!==undefined){assert(['story','inspiration'].includes(doc.type)&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
+    const source=s=>s&&text(s.chatKey,500)&&validId(s.id)&&text(s.hash,100)&&(s.prefixHash===undefined||validPrefix(s.prefixHash));
+    if(doc.activity!==undefined){assert(['story','inspiration','worldTask'].includes(doc.type)&&Array.isArray(doc.activity)&&doc.activity.length<=20,'最近状况无效');for(const a of doc.activity)assert(a&&validId(a.id)&&source(a.source)&&text(a.chatKey,500)&&/^[a-f0-9]{64}$/.test(a.prefixHash)&&Number.isFinite(a.at)&&['applied','missing','invalid','not-requested'].includes(a.status)&&['outline','writing','directory'].every(k=>Number.isInteger(a[k])&&a[k]>=0)&&['titleChanged','chapterChanged','revisionRequested'].every(k=>typeof a[k]==='boolean'),'最近状况记录无效');}
     for(const c of doc.controls??[])assert(c?.prefixHash===undefined||typeof c.prefixHash==='string'&&/^[a-f0-9]{64}$/.test(c.prefixHash),'控制记录来源摘要无效');
-    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2,3,4].includes(a.controlVersion),'最近状况协议版本无效');
-    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2,3,4].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
-    for(const c of doc.controls??[])if([3,4].includes(c.version)){assert(c.chapter===null&&c.nextIds.length===0,'新版控制不使用章节或选条');for(const key of ['addedInspirationIds','usedInspirationIds','updatedNodeIds'])assert(Array.isArray(c[key])&&c[key].length<=20&&c[key].every(validId),'故事控制回执无效');}
+    for(const a of doc.activity??[])assert(a.controlVersion===undefined||[1,2,3,4,5].includes(a.controlVersion),'最近状况协议版本无效');
+    if(doc.controls!==undefined){assert(Array.isArray(doc.controls)&&doc.controls.length<=5000,'控制记录超过上限，请建立新分支或存档');for(const c of doc.controls){assert(c&&validId(c.id)&&source(c.source)&&Array.isArray(c.sources)&&c.sources.every(source)&&text(c.chatKey,500)&&text(c.token,100)&&Number.isFinite(c.at)&&Array.isArray(c.nextIds)&&c.nextIds.length<=12&&c.nextIds.every(validId)&&(c.version===undefined||[1,2,3,4,5].includes(c.version)),'控制记录格式无效');if(c.chapter)assert((c.version===2?c.chapter.title===undefined:text(c.chapter.title,160))&&text(c.chapter.progress,500)&&Array.isArray(c.chapter.lineIds)&&c.chapter.lineIds.every(validId),'剧情目标状态无效');}}
+    for(const c of doc.controls??[])if([3,4,5].includes(c.version)){assert(c.chapter===null&&c.nextIds.length===0,'新版控制不使用章节或选条');for(const key of ['addedInspirationIds','usedInspirationIds','updatedNodeIds'])assert(Array.isArray(c[key])&&c[key].length<=20&&c[key].every(validId),'故事控制回执无效');}
+    for(const c of doc.controls??[])if(c.version===5){
+        assert(c.worldTaskId===undefined||validId(c.worldTaskId),'控制回执世界任务身份无效');
+        assert(c.worldTaskHash===undefined||validPrefix(c.worldTaskHash),'控制回执世界任务版本无效');
+        assert(c.recognition===undefined||['delayed','immediate'].includes(c.recognition),'控制回执识别深度无效');
+    }
+    for(const c of doc.controls??[])if(c.version===5&&c.deferred!==undefined){
+        const d=c.deferred;assert(d&&typeof d==='object'&&!Array.isArray(d),'延后控制材料无效');keys(d,['inspirationIdea','worldTaskIdea','worldTaskSignals']);
+        for(const k of ['inspirationIdea','worldTaskIdea'])assert(d[k]===undefined||d[k]===null||text(d[k],300)&&d[k].trim(),'触发想法超过 300 字符或为空');
+        if(d.worldTaskSignals!==undefined){assert(Array.isArray(d.worldTaskSignals)&&d.worldTaskSignals.length<=50,'世界任务信号数量无效');const ids=new Set();for(const signal of d.worldTaskSignals){assert(signal&&typeof signal==='object'&&!Array.isArray(signal),'世界任务信号无效');keys(signal,['id','status','reason']);assert(validId(signal.id)&&!ids.has(signal.id)&&['achieved','deviated','adjust'].includes(signal.status)&&text(signal.reason,300)&&signal.reason.trim(),'世界任务信号格式无效');ids.add(signal.id);}}
+    }
     for(const f of doc.feedback)assert(!f.source||source(f.source),'点评来源无效');
     assert(doc.processed.every(x=>text(x,300))&&doc.excluded.every(validId),'处理记录或排除列表无效');
     for(const h of doc.history){
         assert(h&&validId(h.id)&&text(h.key,300)&&['user','ai','system'].includes(h.actor)&&Array.isArray(h.sources)&&h.sources.every(source)&&Array.isArray(h.changes),'历史变更格式无效');
         assert(!h.anchor||source(h.anchor),'历史锚点无效');
         assert(!h.feedbackIds||Array.isArray(h.feedbackIds)&&h.feedbackIds.every(validId),'历史点评依据无效');
-        for(const c of h.changes){assert(c&&validId(c.id),'历史条目身份无效');if(doc.type==='inspiration')assert([c.before,c.after].every(r=>!r||r.kind==='inspiration'),'灵感历史不能包含其他类别');for(const r of [c.before,c.after])if(r){validateRecord(r);assert(r.id===c.id,'历史条目归属不符');}}
+        for(const c of h.changes){assert(c&&validId(c.id),'历史条目身份无效');if(['inspiration','worldTask'].includes(doc.type))assert([c.before,c.after].every(r=>!r||r.kind===doc.type),'独立存档历史不能包含其他类别');for(const r of [c.before,c.after])if(r){validateRecord(r);assert(r.id===c.id,'历史条目归属不符');}}
     }
-    for(const j of [...doc.jobs,...doc.proposals])assert(j&&validId(j.id)&&text(j.key,300)&&['world','feedback','reflection','initialization','outline'].includes(j.kind)&&text(j.chatKey,500)&&text(j.input,150000)&&Array.isArray(j.sources)&&j.sources.every(source)&&Array.isArray(j.feedback)&&j.feedback.every(f=>text(f.note)),'维护任务格式无效');
+    for(const j of [...doc.jobs,...doc.proposals])assert(j&&validId(j.id)&&text(j.key,300)&&['world','feedback','reflection','initialization','outline','worldTask','inspirationPlan'].includes(j.kind)&&text(j.chatKey,500)&&text(j.input,150000)&&Array.isArray(j.sources)&&j.sources.every(source)&&Array.isArray(j.feedback)&&j.feedback.every(f=>text(f.note)),'维护任务格式无效');
     for(const j of [...doc.jobs,...doc.proposals])assert(j.connection===undefined||['main','custom'].includes(j.connection),'任务连接无效');
     if (doc.type === 'profile') validateSettings(doc.settings);
     assert(JSON.stringify(doc).length <= 4_000_000, '单档超过 400 万字符，请先导出并建立新档');
@@ -94,7 +116,12 @@ export function validateSettings(s) {
     assert(s.plotConnection===undefined||['main','custom'].includes(s.plotConnection),'剧情点评连接无效');
     assert(s.feedbackThreshold===undefined||Number.isInteger(s.feedbackThreshold)&&s.feedbackThreshold>=1&&s.feedbackThreshold<=100,'点评总结阈值须为 1—100');
     assert(s.waitOutline===undefined||typeof s.waitOutline==='boolean','等待修订设置无效');
-    for(const k of ['injectAuthor','injectStory','injectInspiration'])assert(s[k]===undefined||typeof s[k]==='boolean','正文注入开关无效');
+    for(const k of ['injectAuthor','injectStory','injectInspiration','injectWorldTask'])assert(s[k]===undefined||typeof s[k]==='boolean','正文注入开关无效');
+    assert(s.worldTaskAiEnabled===undefined||typeof s.worldTaskAiEnabled==='boolean','AI 世界任务触发设置无效');
+    assert(s.worldTaskRecognition===undefined||['delayed','immediate'].includes(s.worldTaskRecognition),'世界任务识别深度无效');
+    assert(s.worldTaskView===undefined||['safe','brief','spoiler'].includes(s.worldTaskView),'世界任务剧透显示设置无效');
+    for(const k of ['worldTaskConnection','inspirationConnection'])assert(s[k]===undefined||['main','custom'].includes(s[k]),'创作规划连接无效');
+    assert(s.worldTaskCapacity===undefined||Number.isInteger(s.worldTaskCapacity)&&s.worldTaskCapacity>=1&&s.worldTaskCapacity<=50,'世界任务上限须为 1—50');
     assert(s.inspirationAiEnabled===undefined||typeof s.inspirationAiEnabled==='boolean','AI 灵感维护设置无效');
     for(const [k,min,max] of [['inspirationCapacity',1,200],['inspirationInjectCount',0,20]])assert(s[k]===undefined||Number.isInteger(s[k])&&s[k]>=min&&s[k]<=max,`${k} 超出范围 ${min}—${max}`);
     assert(s.outlineInjection===undefined||['requested','full'].includes(s.outlineInjection),'大纲注入方式无效');
@@ -122,7 +149,7 @@ export function migrateAuthor(doc) {
     return validateDocument(next);
 }
 export function record({id = uid(), kind = 'world', title = '', body = '', ...rest} = {}) {
-    return validateRecord({ id, kind, title, blocks: [{id:uid(),text:body,locked:false}], locked:false, truth:OUTLINE_KINDS.includes(kind)||kind==='inspiration'?'plan':kind === 'world' ? 'intent' : 'guidance', status:'active', importance:'minor', origin:'manual', sources:[], ...(kind==='storyline'?{nextNode:''}:{}),...(kind==='inspiration'?{creator:'user'}:{}), ...rest });
+    return validateRecord({ id, kind, title, blocks: [{id:uid(),text:body,locked:false}], locked:false, truth:OUTLINE_KINDS.includes(kind)||['inspiration','worldTask'].includes(kind)?'plan':kind === 'world' ? 'intent' : 'guidance', status:'active', importance:'minor', origin:'manual', sources:[], ...(['storyline','worldTask'].includes(kind)?{nextNode:''}:{}),...(kind==='worldTask'?{summary:''}:{}),...(kind==='inspiration'?{creator:'user'}:{}), ...rest });
 }
 function canChange(before, after, actor) {
     if (!before || actor === 'user') return;
@@ -138,6 +165,9 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
     assert(Array.isArray(changes) && changes.length <= 100, '一次最多 100 个变更');
     if (doc.processed.includes(key)) return copy(doc);
     if(doc.type==='inspiration')assert(changes.every(c=>c.op==='put'?c.record?.kind==='inspiration':doc.records.find(r=>r.id===c.id)?.kind==='inspiration'),'灵感档不能修改其他类别');
+    if(doc.type==='worldTask')assert(changes.every(c=>c.op==='put'?c.record?.kind==='worldTask':doc.records.find(r=>r.id===c.id)?.kind==='worldTask'),'世界任务档不能修改其他类别');
+    if(actor!=='user'&&origin==='worldTask')assert(doc.type==='worldTask','世界任务维护须属于世界任务档');
+    if(actor!=='user'&&origin==='inspirationPlan')assert(doc.type==='inspiration','灵感规划须属于灵感档');
     const next = copy(doc), diffs = [], seen = new Set();
     for (const change of changes) {
         assert(change && ['put','remove'].includes(change.op), '不支持的操作');
@@ -160,6 +190,8 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
                 if (origin === 'world') assert(['world','focus'].includes(after.kind)&&(!before||['world','focus'].includes(before.kind)), '世界维护不能冒充用户偏好');
                 if (origin === 'feedback') assert(['guide','focus','experience'].includes(after.kind)&&(!before||['guide','focus','experience'].includes(before.kind)), '点评不能改写世界事实');
                 if (origin === 'outline') assert(OUTLINE_KINDS.includes(after.kind)&&(!before||OUTLINE_KINDS.includes(before.kind)), '改纲只能修改大纲条目');
+                if (origin === 'worldTask') assert(after.kind==='worldTask'&&(!before||before.kind==='worldTask'),'世界任务维护不能修改其他资料');
+                if (origin === 'inspirationPlan') assert(after.kind==='inspiration'&&(!before||before.kind==='inspiration'),'灵感规划不能修改其他资料');
                 if (origin === 'storycontrol') assert(['storyline','inspiration'].includes(after.kind)&&(!before||before.kind===after.kind),'正文只能维护故事节点和灵感');
             } else after.origin='manual';
             validateRecord(after);
@@ -168,6 +200,8 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
             if (actor !== 'user' && origin === 'reflection') assert(before.kind === 'experience', '自总结只能删除作者经验');
             if (actor !== 'user' && origin === 'world') assert(['world','focus'].includes(before.kind), '世界维护不能删除用户指南');
             if (actor !== 'user' && origin === 'feedback') assert(['guide','focus','experience'].includes(before.kind), '点评不能删除世界事实');
+            if(actor!=='user'&&origin==='worldTask')assert(before.kind==='worldTask','世界任务维护不能删除其他资料');
+            if(actor!=='user'&&origin==='inspirationPlan')assert(before.kind==='inspiration','灵感规划不能删除其他资料');
             if (actor !== 'user' && origin === 'outline') assert(OUTLINE_KINDS.includes(before.kind), '改纲不能删除写作偏好');
         }
         canChange(before, after, actor);
@@ -182,17 +216,17 @@ export function applyChanges(doc, changes, { actor = 'ai', origin = 'world', sou
     return validateDocument(next);
 }
 export function invalidateSources(doc, chatKey, currentSources) {
-    const next = copy(doc), hashes = new Map(currentSources.map(x=>[x.id,x.hash]));
-    const invalid = r => r?.sources?.some(s=>s.chatKey === chatKey && hashes.get(s.id) !== s.hash);
+    const next = copy(doc), hashes = new Map(currentSources.map(x=>[x.id,x.hash])),prefixes=sourcePrefixes(currentSources);
+    const invalid = r => r?.sources?.some(s=>s.chatKey===chatKey&&(hashes.get(s.id)!==s.hash||s.prefixHash!==undefined&&prefixes.get(s.id)!==s.prefixHash));
     // A source-invalid deletion has no current record to visit. Restore its before-image
     // only when it is still the last change for that ID (never undo a later user edit).
     const latest=new Map();for(const h of next.history)for(const c of h.changes)latest.set(c.id,{h,c});
-    for(const {h,c} of latest.values())if(!c.after&&h.actor==='ai'&&['world','outline','initialization','storycontrol'].includes(h.origin)&&invalid(h)&&!next.records.some(r=>r.id===c.id)&&c.before&&!invalid(c.before)){
+    for(const {h,c} of latest.values())if(!c.after&&h.actor==='ai'&&['world','outline','initialization','storycontrol','worldTask','inspirationPlan'].includes(h.origin)&&invalid(h)&&!next.records.some(r=>r.id===c.id)&&c.before&&!invalid(c.before)){
         next.records.push(copy(c.before));next.history.push({id:uid(),key:uid(),actor:'system',origin:'invalidation',sources:[],anchor:null,at:Date.now(),changes:[{id:c.id,before:null,after:copy(c.before)}]});
     }
     for (const r of [...next.records]) {
         // Feedback and deliberate author experience survive a changed source passage.
-        if (!['world','focus','inspiration',...OUTLINE_KINDS].includes(r.kind) || !invalid(r)) continue;
+        if (!['world','focus','inspiration','worldTask',...OUTLINE_KINDS].includes(r.kind) || !invalid(r)) continue;
         const hasProtection = r.locked || r.blocks.some(b=>b.locked);
         if (hasProtection || r.origin === 'manual') {
             if (!next.excluded.includes(r.id)) next.excluded.push(r.id);
@@ -209,8 +243,8 @@ export function invalidateSources(doc, chatKey, currentSources) {
         next.history.push({id:uid(),key:uid(),actor:'system',origin:'invalidation',sources:[],anchor:null,at:Date.now(),changes:[{id:r.id,before:r,after:previous}]});
     }
     for (const f of next.feedback) if (f.source?.chatKey === chatKey) f.sourceChanged = hashes.get(f.source.id) !== f.source.hash;
-    next.jobs = next.jobs.filter(j=> !(j.sources ?? []).some(s=>s.chatKey === chatKey && hashes.get(s.id) !== s.hash));
-    next.proposals = next.proposals.filter(j=> !(j.sources ?? []).some(s=>s.chatKey === chatKey && hashes.get(s.id) !== s.hash));
+    next.jobs = next.jobs.filter(j=>!invalid(j));
+    next.proposals = next.proposals.filter(j=>!invalid(j));
     return validateDocument(next);
 }
 export function forkAt(doc, {title, chatKey, sources, anchorIds, destinationChatKey=chatKey}) {
@@ -246,6 +280,8 @@ export function restoreDocument(current, historical) {
     validateDocument(historical);
     assert(current.id === historical.id && current.type === historical.type, '恢复文档归属不符');
     const next = copy(historical);
+    // Historical receipts remain auditable, but restoring a save point does not replay its old API triggers.
+    for(const c of next.controls??[])for(const key of ['deferred','worldTaskId','worldTaskHash','recognition'])delete c[key];
     for (const r of current.records) {
         const restored = next.records.find(x=>x.id === r.id);
         canChange(r, restored ?? null, 'restore');

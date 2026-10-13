@@ -2,6 +2,7 @@ import {assert,copy,hash,uid,validId} from '../core/model.js';
 import {networkError,retryRequest} from './network.js';
 import {promptText} from '../core/prompt-templates.js';
 import {CONTROL_FILTER,stripControl} from '../core/outline.js';
+import {memoryArchiveRevision,worldTaskMaterial} from '../core/memory-archive.js';
 
 export class TavernHost {
     constructor(context = ()=>globalThis.SillyTavern?.getContext()) { this.context=context;this.foreground=false;this.rawPending=false;this.disposers=[];this.key=''; }
@@ -151,19 +152,90 @@ export class TavernHost {
         return {text,usage:data.usage??null,finishReason:data.choices?.[0]?.finish_reason??null};
     }
     async waitRaw(){if(!this.rawPending)return;let timer;try{await Promise.race([this.rawCompletion,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('主连接仍未释放，请稍后重发正文；大纲和输入保留')),30000);})]);}finally{clearTimeout(timer);}}
-    async memorySnapshot() {
-        const c=this.ctx(),{character,chat}=this.identity(),binding=c.extensionSettings?.bb_memory?.chatSlotBindings?.entries?.[character]?.[chat];
-        if(!binding?.slotName)return null;
-        const lf=c.libs?.localforage??globalThis.SillyTavern?.libs?.localforage;if(!lf)return null;
-        // Only these version-observed storage keys; no mutation or guessed last-used slot.
-        const raw=await lf.getItem(`bb_memory_slot_${character}_${binding.slotName}`);
-        const slot=raw?.schema==='bb-memory-vector-ref-v1'?raw.data:raw;
-        assert(this.identity().character===character&&this.identity().chat===chat&&this.ctx().extensionSettings?.bb_memory?.chatSlotBindings?.entries?.[character]?.[chat]?.slotName===binding.slotName,'读取 BB-Memory 期间存档已切换，请重试');
-        if(!slot)return null;
-        const stamp=slot._slotCreatedAt;
-        if(!stamp)return {available:false,reason:'当前 BB-Memory 存档缺少可验证的创建标识，暂不联动'};
-        return {available:true,character,slotName:binding.slotName,stamp:String(stamp),signature:JSON.stringify([character,binding.slotName,String(stamp)]),bindingAt:binding.updatedAt,data:slot};
+    memoryAccountBoundary() {
+        const c=this.ctx(),localScope=c.accountStorage?.getItem?.('bbpresets_local_scope')??null;
+        if(this.memoryAccountOwner&&(this.memoryAccountOwner!==c.extensionSettings||this.memoryAccountStorage!==c.accountStorage||this.memoryAccountLocalScope!==localScope))this.memoryAccountLocked=true;
+        assert(!this.memoryAccountLocked,'BB-Memory 账号已切换，请刷新页面后重试');
+        return {settings:c.extensionSettings,storage:c.accountStorage,localScope};
     }
+    watchMemoryAccount() {
+        if(this.destroyed||this.memoryAccountWatching||!globalThis.document)return;
+        this.memoryAccountWatching=true;
+        const verify=()=>{
+            if(document.visibilityState==='hidden')return;
+            this.memoryAccountNeedsVerification=true;this.memoryAccountGeneration=(this.memoryAccountGeneration??0)+1;
+            this.memoryStorageScope({verify:true}).catch(error=>{this.memoryAccountLocked=true;this.memoryAccountError=error.message;});
+        };
+        globalThis.window?.addEventListener?.('focus',verify);document.addEventListener('visibilitychange',verify);
+        this.disposers.push(()=>{globalThis.window?.removeEventListener?.('focus',verify);document.removeEventListener('visibilitychange',verify);});
+        if(typeof BroadcastChannel==='function'){
+            const channel=new BroadcastChannel('bb-memory-account-session');
+            channel.onmessage=event=>{if(typeof event.data?.scope==='string'&&this.memoryAccountScope&&event.data.scope!==this.memoryAccountScope){this.memoryAccountLocked=true;this.memoryAccountGeneration=(this.memoryAccountGeneration??0)+1;}};
+            this.disposers.push(()=>channel.close());
+        }
+    }
+    memorySelectionToken() {
+        const c=this.ctx(),{character,chat}=this.identity(),settings=c.extensionSettings?.bb_memory;
+        this.memoryAccountBoundary();
+        const binding=(settings?.chatSlotBindings?.entries??settings?.chatSlotBindings)?.[character]?.[chat],slotName=typeof binding==='string'?binding:String(binding?.slotName??'');
+        // Routing only. Polling does not read localforage, hash memory text or use the network.
+        return JSON.stringify([Boolean(settings),character,chat,slotName,typeof binding==='object'?binding.updatedAt??0:0,this.memoryAccountGeneration??0]);
+    }
+    async memoryStorageScope({verify=false}={}) {
+        const c=this.ctx(),boundary=this.memoryAccountBoundary();
+        // Minimal legacy contexts have no account API. Real ST exposes getRequestHeaders.
+        if(typeof c.getRequestHeaders!=='function')return '';
+        if(this.memoryAccountPending)return this.memoryAccountPending;
+        if(this.memoryAccountScope&&!verify&&!this.memoryAccountNeedsVerification)return this.memoryAccountScope;
+        this.memoryAccountPending=(async()=>{
+            const response=await fetch('/api/users/me',{credentials:'same-origin',cache:'no-store',headers:c.getRequestHeaders(),signal:AbortSignal.timeout(15000)});
+            assert(response.ok,'无法确认 BB-Memory 当前账号，未读取存档；请刷新页面后重试');
+            const user=await response.json();
+            assert(typeof user?.handle==='string'&&user.handle.trim(),'BB-Memory 账号身份返回不完整，未读取存档；请刷新页面后重试');
+            const scope=`bb_user_v1_${encodeURIComponent(JSON.stringify([user.handle,user.created??'']))}::`;
+            if(this.memoryAccountScope&&this.memoryAccountScope!==scope)this.memoryAccountLocked=true;
+            assert(!this.memoryAccountLocked&&this.ctx().extensionSettings===boundary.settings&&this.ctx().accountStorage===boundary.storage&&(this.ctx().accountStorage?.getItem?.('bbpresets_local_scope')??null)===boundary.localScope,'BB-Memory 账号已切换，请刷新页面后重试');
+            this.memoryAccountScope=scope;this.memoryAccountOwner=boundary.settings;this.memoryAccountStorage=boundary.storage;this.memoryAccountLocalScope=boundary.localScope;this.memoryAccountNeedsVerification=false;
+            this.watchMemoryAccount();
+            return scope;
+        })();
+        try{return await this.memoryAccountPending;}finally{this.memoryAccountPending=null;}
+    }
+
+    async memorySnapshot() {
+        const c=this.ctx(),settings=c.extensionSettings?.bb_memory,{character,chat}=this.identity();
+        if(!settings)return null;
+        const entries=settings.chatSlotBindings?.entries??settings.chatSlotBindings,binding=entries?.[character]?.[chat];
+        const slotName=typeof binding==='string'?binding:String(binding?.slotName??'');
+        const unavailable=reason=>({available:false,present:true,character,slotName,reason});
+        if(!slotName)return unavailable('当前聊天尚未绑定 BB-Memory 存档，请先在 BB-Memory 选择并保存存档后重试');
+        const lf=c.libs?.localforage??globalThis.SillyTavern?.libs?.localforage;
+        const scope=await this.memoryStorageScope();
+        let raw=lf?await lf.getItem(scope+`bb_memory_slot_${character}_${slotName}`):null,source='local';
+        // Read only an explicitly scoped, server-backed snapshot, never an ambiguous legacy key.
+        if(raw==null){
+            const key=`bb_memory_slot_data_${encodeURIComponent(character)}__${encodeURIComponent(slotName)}`,backup=c.chatMetadata?.[key];
+            if(backup){try{raw=typeof backup==='string'?JSON.parse(backup):backup;source='chatMetadata';}catch{return unavailable('BB-Memory 已保存槽备份不是有效 JSON，请先重新保存 BB-Memory 存档后重试');}}
+        }
+        const current=this.ctx().extensionSettings?.bb_memory,latest=(current?.chatSlotBindings?.entries??current?.chatSlotBindings)?.[character]?.[chat],latestName=typeof latest==='string'?latest:String(latest?.slotName??'');
+        assert(this.identity().character===character&&this.identity().chat===chat&&this.ctx().extensionSettings===c.extensionSettings&&current===settings&&latestName===slotName,'读取 BB-Memory 期间存档或账号已切换，请重试');
+        const slot=raw?.schema==='bb-memory-vector-ref-v1'?raw.data:raw;
+        if(!slot)return unavailable('当前 BB-Memory 存档尚无可读取的已保存数据，请先在 BB-Memory 保存当前存档后重试');
+        const stamp=slot._slotCreatedAt??slot.createdAt;
+        if((typeof stamp!=='number'&&typeof stamp!=='string')||!String(stamp).trim()||!Number.isFinite(Number(stamp))||Number(stamp)<=0)return unavailable('当前 BB-Memory 存档缺少可验证的创建标识，请先保存或升级 BB-Memory 后重试');
+        const snapshot={available:true,present:true,character,slotName,stamp:String(stamp),signature:JSON.stringify([character,slotName,String(stamp)]),identitySignature:JSON.stringify([character,String(stamp)]),bindingAt:typeof binding==='object'?binding.updatedAt:0,updatedAt:slot._slotUpdatedAt??slot.updatedAt??null,source,data:slot};
+        snapshot.revisionSignature=await hash(JSON.stringify(memoryArchiveRevision(snapshot)));
+        return snapshot;
+    }
+    async worldTaskSeed(budget=20000) {
+        const identity=this.identity(),snapshot=await this.memorySnapshot();
+        assert(!snapshot||snapshot.available,snapshot?.reason);
+        const world=JSON.parse(await this.seed(budget)),material=worldTaskMaterial(snapshot,world,budget),latest=await this.memorySnapshot();
+        assert(identity.chatKey===this.identity().chatKey&&(snapshot?.identitySignature??null)===(latest?.identitySignature??null)&&(snapshot?.revisionSignature??null)===(latest?.revisionSignature??null),'读取世界任务资料期间聊天或 BB-Memory 存档已变化，请重试');
+        this.worldTaskSeedInfo={sections:material.world.materials.map(section=>section.label),notes:material.notes,omitted:material.world.omitted,counts:Object.fromEntries(['timeline','milestones','npc','items','memories'].map(key=>[key,material.memory?.[key]?.length??0]))};
+        return {...material,memorySnapshot:snapshot?{available:snapshot.available,identitySignature:snapshot.identitySignature,revisionSignature:snapshot.revisionSignature,signature:snapshot.signature,character:snapshot.character,slotName:snapshot.slotName,stamp:snapshot.stamp,updatedAt:snapshot.updatedAt,source:snapshot.source}:null,counts:this.worldTaskSeedInfo.counts};
+    }
+
     memoryRetrieval(snapshot){
         let result;try{result=globalThis.bbMemoryDebug?.lastRetrievalResult?.();}catch{return null;}
         const bindingAt=Number(snapshot.bindingAt),createdAt=Number(snapshot.stamp);
@@ -171,6 +243,6 @@ export class TavernHost {
         if(!result||String(result.chatId)!==this.identity().chat||!Number.isFinite(bindingAt)||!Number.isFinite(createdAt)||!Number.isFinite(result.timestamp)||result.timestamp<Math.max(bindingAt,createdAt))return null;
         return copy(result);
     }
-    destroy(){this.disposers.forEach(fn=>fn());this.controlFilter(false);this.inject('');}
+    destroy(){this.destroyed=true;this.disposers.forEach(fn=>fn());this.controlFilter(false);this.inject('');}
 }
 function abortable(promise,signal){return new Promise((resolve,reject)=>{const abort=()=>{cleanup();reject(Error('维护已取消或超时，晚到结果不会应用'));};const cleanup=()=>signal.removeEventListener('abort',abort);if(signal.aborted)return abort();signal.addEventListener('abort',abort,{once:true});promise.then(x=>{cleanup();resolve(x);},e=>{cleanup();reject(e);});});}

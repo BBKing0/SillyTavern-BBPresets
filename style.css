@@ -84,7 +84,7 @@
 .bbp-quick .bbp-status { border-top:1px solid var(--bbp-border); border-bottom:0; font-size:.72em; }
 
 /* Navigation follows the current product: story, author, tasks, then tools. */
-.bbp-embedded nav.bbp-groups { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.2rem; }
+.bbp-embedded nav.bbp-groups { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:.2rem; }
 .bbp-embedded .bbp-groups button { margin:0; min-width:0; padding:.45rem .15rem; font-size:.9em; }
 .bbp-embedded nav.bbp-subnav { border-bottom:1px solid var(--bbp-border); padding-bottom:.5rem; }
 .bbp-status-main { white-space:pre-line; line-height:1.65; }
@@ -101,3 +101,10 @@
 .bbp-archive-counts { height:clamp(12rem,42dvh,26rem); max-height:26rem; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; border:1px solid var(--bbp-border); border-radius:.5rem; padding:.4rem; }
 .bbp-archive-counts .bbp-card { margin:.3rem 0; }
 @media(max-width:600px) { .bbp-archive-counts { height:clamp(10rem,36dvh,20rem); } }
+
+/* World tasks keep spoilers inside the explicitly selected display mode. */
+.bbp-next-node { border-left:3px solid var(--bbp-accent); padding:.5rem .65rem; background:color-mix(in srgb,var(--bbp-accent) 7%,transparent); white-space:pre-wrap; }
+.bbp-binding-row { border-top:1px solid var(--bbp-border); padding:.65rem 0; overflow-wrap:anywhere; }
+.bbp-dialog .bbp-delete { opacity:.85; }
+.bbp-world-task h3 { overflow-wrap:anywhere; }
+@media(max-width:600px) { .bbp-embedded nav.bbp-groups { grid-template-columns:repeat(4,minmax(0,1fr)); } .bbp-world-task > button { width:calc(100% - .4rem); } }

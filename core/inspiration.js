@@ -10,13 +10,13 @@ export function inspirationFrom(source,{id,title}={}) {
     next.processed=next.history.map(h=>h.key);
     next.excluded=source.excluded.filter(id=>ids.has(id));
     next.conflicts=copy(source.conflicts.filter(c=>ids.has(c.recordId)));
-    next.controls=copy((source.controls??[]).filter(c=>[3,4].includes(c.version))).map(c=>({...c,version:4,chapter:null,nextIds:[],updatedNodeIds:[]}));
+    next.controls=copy((source.controls??[]).filter(c=>[3,4,5].includes(c.version))).map(c=>{const next={...c,version:c.version===5?5:4,chapter:null,nextIds:[],updatedNodeIds:[]};for(const k of ['deferred','worldTaskId','worldTaskHash','recognition'])delete next[k];return next;});
     if(source.type==='story')next.legacySourceId=source.id;
     return validateDocument(next);
 }
 
 export function retireTasks(doc) {
-    const next=copy(doc),obsolete=j=>!['profile','author'].includes(next.type)||j.kind!=='feedback';
+    const next=copy(doc),obsolete=j=>j.kind!==({profile:'feedback',author:'feedback',inspiration:'inspirationPlan',worldTask:'worldTask'}[next.type]);
     const retired=[...next.jobs.filter(obsolete),...next.proposals.filter(obsolete)];
     if(retired.length)next.retiredTasks=[...(next.retiredTasks??[]),...retired.map(j=>({...j,state:'retired'}))];
     next.jobs=next.jobs.filter(j=>!obsolete(j));next.proposals=next.proposals.filter(j=>!obsolete(j));

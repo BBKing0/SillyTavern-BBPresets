@@ -11,14 +11,16 @@ const input=(value='',type='text')=>{const n=el('input');n.type=type;n.value=val
 const area=(value='')=>{const n=el('textarea');n.value=value;n.rows=4;return n;};
 const select=(items,value)=>{const n=el('select');for(const [id,label] of items){const o=el('option',label);o.value=id;n.append(o);}n.value=value??items[0]?.[0]??'';return n;};
 const check=(value=false)=>{const n=input('','checkbox');n.checked=value;return n;};
-const kinds=[['storyline','故事核'],['inspiration','灵感激发点'],['core','旧故事核心'],['line','旧故事线'],['chapter','旧章节'],['clue','旧伏笔 / 支线'],['guide','写作建议'],['world','历史世界参考'],['focus','历史叙事关注'],['experience','历史作者经验']];
+const kinds=[['storyline','故事核'],['inspiration','灵感激发点'],['worldTask','世界任务'],['core','旧故事核心'],['line','旧故事线'],['chapter','旧章节'],['clue','旧伏笔 / 支线'],['guide','写作建议'],['world','历史世界参考'],['focus','历史叙事关注'],['experience','历史作者经验']];
 const truths=[['plan','构思 / 待验证'],['intent','行动意图'],['event','已发生'],['guidance','写作指导']];
 const when=n=>new Date(n).toLocaleString();
 const body=r=>r?recordText(r):'（不存在）';
-const pages=[['overview','概览'],['archives','存档'],['inspirations','灵感激发点'],['authors','个性化作者'],['feedback','划线评'],['review','任务队列'],['injection','注入预览'],['prompts','提示词'],['settings','设置'],['versions','版本恢复']];
-const groups=[['overview','概览',['overview']],['archives','存档',['archives']],['inspiration','灵感',['inspirations']],['author','作者',['authors','feedback']],['tasks','任务',['review']],['tools','工具',['settings','prompts','injection','versions']]];
+const scopeName=d=>({worldTask:'世界任务',inspiration:'灵感',story:'旧故事'}[d.type]??'作者');
+const changedBody=r=>body(r)+(r?.kind==='worldTask'?'\n下一阶段：'+(r.nextNode||'暂未安排'):'');
+const pages=[['overview','概览'],['archives','存档'],['inspirations','灵感激发点'],['worldTasks','世界任务'],['authors','个性化作者'],['feedback','划线评'],['review','任务队列'],['injection','注入预览'],['prompts','提示词'],['settings','设置'],['versions','版本恢复']];
+const groups=[['overview','概览',['overview']],['archives','存档',['archives']],['inspiration','灵感',['inspirations']],['worldTask','世界任务',['worldTasks']],['author','作者',['authors','feedback']],['tasks','任务',['review']],['tools','工具',['settings','prompts','injection','versions']]];
 const UI_KEY='bbpresets_ui_v1'; // Device layout and selection preferences only: no story text or credentials.
-const jobLabel=(app,job)=>{const name=job.kind==='feedback'?(job.feedback?.some(f=>f.category==='plot')?'剧情点评总结':'写作点评总结'):'废案任务';return name+' · '+(app.taskSettings(job.kind,job).connection==='main'?'主 API':'副 API');};
+const jobLabel=(app,job)=>{const name=job.kind==='feedback'?(job.feedback?.some(f=>f.category==='plot')?'剧情点评总结':'写作点评总结'):({worldTaskCreate:'生成世界任务',worldTaskAdvance:'推进世界任务',inspirationPlan:'安排灵感',worldTask:job.signal?.mode==='advance'?'推进世界任务':'生成世界任务',inspiration:'灵感安排'}[job.kind]??'废案任务');return name+' · '+(app.taskSettings(job.kind,job).connection==='main'?'主 API':'副 API');};
 export function download(value,name='BBPresets-export.json'){
     const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));
     const a=el('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -26,7 +28,7 @@ export function download(value,name='BBPresets-export.json'){
 
 export class Workbench {
     constructor(app){
-        this.app=app;this.tab='overview';this.revealed=false;this.selection=null;this.selectedFeedback=new Set();this.storyId=null;this.editor=null;this.expandedRecords=new Set();this.recordDrafts=new Map();this.promptDrafts={};this.feedbackDrafts=new Map();this.inspirationDrafts=new Map();
+        this.app=app;this.tab='overview';this.revealed=false;this.selection=null;this.selectedFeedback=new Set();this.storyId=null;this.editor=null;this.expandedRecords=new Set();this.recordDrafts=new Map();this.promptDrafts={};this.feedbackDrafts=new Map();this.inspirationDrafts=new Map();this.worldTaskDrafts=new Map();
         this.ui={showBall:true,feedbackOpen:true,polarity:'positive',intent:'save',category:'writing'};try{const saved=JSON.parse(localStorage.getItem(UI_KEY));if(saved){this.ui.showBall=saved.showBall!==false;this.ui.feedbackOpen=saved.feedbackOpen!==false;for(const [key,allowed] of Object.entries({polarity:['positive','negative','neutral'],intent:['save','batch','send'],category:['writing','plot']}))if(allowed.includes(saved[key]))this.ui[key]=saved[key];if(Number.isFinite(saved.left)&&Number.isFinite(saved.top)){this.ui.left=saved.left;this.ui.top=saved.top;}}}catch{/* Storage restrictions must not prevent opening the workspace. */}
         this.surface=el('div');this.surface.id='bbpresets-surface';
         // A zero-size host never intercepts the chat. Only the panel and ball receive pointers.
@@ -34,7 +36,7 @@ export class Workbench {
         this.shadow=this.surface.attachShadow({mode:'open'});document.body.append(this.surface);
         loadStyle(this.shadow).ready.then(()=>{if(!this.destroyed){this.surface.style.visibility='visible';this.onResize();}}).catch(e=>this.app.report(e));
         this.dialog=el('section','','bbp-dialog bbp-embedded');this.dialog.id='bbpresets-workbench';this.dialog.setAttribute('aria-label','BBPresets 扩展工作台');
-        const header=el('header');header.append(el('strong','个性化作者 · 灵感'));
+        const header=el('header');header.append(el('strong','个性化作者 · 灵感 · 世界任务'));
         this.waitPanel=el('div','','bbp-card');this.waitLabel=el('p');this.waitPanel.append(this.waitLabel);this.waitPanel.hidden=true;
         this.status=el('div','','bbp-status');this.status.setAttribute('role','status');
         this.statusMain=el('div','','bbp-status-main');const statusDetails=el('details','','bbp-status-details');this.statusMore=el('div');statusDetails.append(el('summary','运行详情'),this.statusMore);this.recent=el('details','','bbp-recent');this.recentSummary=el('summary','最近状况');this.recentBody=el('div');this.recent.append(this.recentSummary,this.recentBody);this.status.append(this.statusMain,this.recent,statusDetails);
@@ -47,13 +49,13 @@ export class Workbench {
         }
         this.content=el('main');this.dialog.append(header,this.status,this.message,this.waitPanel,this.groupNav,this.nav,this.content);
         this.pageCache=new Map();
-        this.onChange=()=>{const id=(this.app.inspiration?.data.id??'')+':'+this.app.host.identity().chatKey+':'+(this.app.author?.data.id??''),loaded=!this.hadProfile&&this.app.profile,draftLoaded=this.app.ready&&this.draftLoadVersion!==this.app.draftLoadVersion;if(this.app.ready)this.draftLoadVersion=this.app.draftLoadVersion;this.hadProfile=Boolean(this.app.profile);let switched=false;if(id!==this.storyId){this.storyId=id;this.revealed=false;if(this.editor)this.recordDrafts.set(this.editor.target+':'+this.editor.draft.id,this.editor);this.editor=null;this.pageCache.clear();this.selectedFeedback.clear();switched=true;}if(switched||loaded)this.quickActions();if(switched||loaded||((draftLoaded||this.waitingForStory&&this.app.ready)&&this.tab==='setup'))this.render();this.updateStatus();};
+        this.onChange=()=>{const id=(this.app.inspiration?.data.id??'')+':'+(this.app.worldTask?.data.id??'')+':'+this.app.host.identity().chatKey+':'+(this.app.author?.data.id??''),loaded=!this.hadProfile&&this.app.profile,draftLoaded=this.app.ready&&this.draftLoadVersion!==this.app.draftLoadVersion;if(this.app.ready)this.draftLoadVersion=this.app.draftLoadVersion;this.hadProfile=Boolean(this.app.profile);let switched=false;if(id!==this.storyId){this.storyId=id;this.revealed=false;if(this.editor)this.recordDrafts.set(this.editor.target+':'+this.editor.draft.id,this.editor);this.editor=null;this.pageCache.clear();this.selectedFeedback.clear();switched=true;}if(switched||loaded)this.quickActions();if(switched||loaded||((draftLoaded||this.waitingForStory&&this.app.ready)&&this.tab==='setup'))this.render();this.updateStatus();};
         app.listeners.add(this.onChange);
         this.onSelection=()=>{const s=globalThis.getSelection?.();if(!s||s.isCollapsed||!s.rangeCount)return;const range=s.getRangeAt(0),node=range.commonAncestorContainer;const parent=node.nodeType===1?node:node.parentElement;const message=parent?.closest('.mes');if(!message||!parent.closest('.mes_text'))return;const floor=Number(message.getAttribute('mesid')),m=app.host.ctx().chat?.[floor];if(m&&!m.is_user)this.selection={quote:s.toString(),raw:m.mes,floor,chatKey:app.host.identity().chatKey};};
         document.addEventListener('pointerup',this.onSelection);
         this.entry=el('div','','bbp-entry inline-drawer');this.entry.id='bbpresets-entry';
         const summary=el('div','','inline-drawer-toggle inline-drawer-header bbp-entry-toggle');summary.setAttribute('role','button');summary.tabIndex=0;this.summary=summary;
-        summary.append(el('b','BBPresets v0.5.8'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
+        summary.append(el('b','BBPresets v0.5.9'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
         this.entryContent=el('div','','inline-drawer-content bbp-entry-content');this.entryContent.id='bbpresets-entry-content';this.entryContent.hidden=true;
         summary.setAttribute('aria-expanded','false');summary.setAttribute('aria-controls',this.entryContent.id);
         // Own this click so ST's delegated slideToggle cannot toggle a second time.
@@ -171,11 +173,11 @@ export class Workbench {
     button(label,fn){const b=el('button',label,'menu_button');b.type='button';b.addEventListener('click',async()=>{if(b.disabled)return;b.disabled=true;const show=text=>{if(this.message)this.message.textContent=text;if(this.quickMessage)this.quickMessage.textContent=text;if(this.ball)this.layout();};show('正在处理…');try{const result=await fn();show(typeof result==='string'?result:'操作完成');}catch(e){show(e.message);this.app.report(e);}finally{b.disabled=false;}});return b;}
     updateStatus(){
         const a=this.app,s=a.inspiration?.data,names={loading:'读取服务器中',saving:'正在保存',saved:'已保存到酒馆服务器',error:'保存未完成，请查看恢复区'};
-        const live=a.requestState||(a.auxiliary?'测试连接中':a.activeJob?'正在处理点评':a.jobs.length?'点评任务待处理':a.settings?.enabled?'灵感按需使用，点评维护作者':'插件已停用');
-        const status=`灵感：${s?.title??'尚未加载'}\n作者：${a.author?.data.title??'尚未加载'}\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
+        const live=a.requestState||(a.auxiliary?'测试连接中':a.activeJob?'正在维护资料':a.jobs.length?'维护任务待处理':a.settings?.enabled?'灵感按需使用，点评维护作者':'插件已停用');
+        const status=`灵感：${s?.title??'尚未加载'}\n世界任务：${a.worldTask?.data.title??'尚未加载'}\n作者：${a.author?.data.title??'尚未加载'}\n${names[a.status]??a.status} · ${live}${a.error?'\n'+a.error:''}`;
         this.statusMain.textContent=status;this.statusMore.textContent=`待用灵感 ${s?.records.filter(r=>r.status==='active').length??0} 条 · 待办 ${a.jobs.length} / 提案 ${a.proposals.length}${a.controlStatus?' · '+a.controlStatus:''}${a.host.controlWarning?' · '+a.host.controlWarning:''}`;
         if(this.quickStatus)this.quickStatus.textContent=status;
-        this.updateArchiveCounts();this.refreshRecords?.();this.refreshQuickInspiration?.();
+        this.updateArchiveCounts();this.refreshMemoryBindings?.();this.refreshRecords?.();this.refreshQuickInspiration?.();
         for(const [summary,body] of [[this.recentSummary,this.recentBody],[this.quickRecentSummary,this.quickRecentBody]])if(summary&&body){summary.textContent='最近状况 · '+a.recentStatus[0];body.replaceChildren(...a.recentStatus.slice(1).map(text=>el('p',text,'bbp-hint')));}
         if(this.entryEnabled){this.entryEnabled.checked=Boolean(a.settings?.enabled);this.entryEnabled.disabled=!a.settings;}
         if(this.ball){this.ball.hidden=!this.ui.showBall;this.ball.dataset.busy=String(Boolean(a.running||a.auxiliary));this.ball.dataset.error=String(Boolean(a.error));this.ball.title='BBPresets · '+live;if(!this.quick.hidden)this.layout();}
@@ -197,46 +199,89 @@ export class Workbench {
         this.refreshRecords=null;
         this.pageCache.delete(this.tab);
         this.content.replaceChildren();this.updateStatus();this.updateNavigation();
-        const fn={overview:'overview',archives:'archives',inspirations:'inspirations',authors:'authors',feedback:'feedback',review:'review',settings:'settings',versions:'versions',prompts:'prompts',injection:'injectionPreview'}[this.tab];
+        const fn={overview:'overview',archives:'archives',inspirations:'inspirations',worldTasks:'worldTasks',authors:'authors',feedback:'feedback',review:'review',settings:'settings',versions:'versions',prompts:'prompts',injection:'injectionPreview'}[this.tab];
         if(!this.app.profile&&this.tab!=='versions'){this.content.append(el('p','正在连接酒馆资料存储；失败时可到“工具 → 版本恢复”重新读取。'),this.button('打开版本恢复',()=>this.open('versions')));return;}
-        if(this.tab==='inspirations'&&!this.app.inspiration){this.content.append(el('p','灵感档案尚未加载，请从服务器重试。'),this.button('重新读取服务器',()=>this.app.refresh()));return;}
+        if(['inspirations','worldTasks'].includes(this.tab)&&!(this.tab==='inspirations'?this.app.inspiration:this.app.worldTask)){this.content.append(el('p','存档尚未加载，请从服务器重试。'),this.button('重新读取服务器',()=>this.app.refresh()));return;}
         this[fn]();
     }
     section(title,hint=''){const card=el('section','','bbp-card');card.append(el('h3',title));if(hint)card.append(el('p',hint,'bbp-hint'));return card;}
     authorGate(){if(this.revealed)return true;this.content.append(el('p','此页包含世界幕后、行动意图和作者构思，可能透露剧情。'),this.button('查看剧情资料',()=>{this.revealed=true;this.render();}));return false;}
     archiveImport(container=this.content){
-        const file=input('','file');file.accept='.json,application/json';container.append(field('导入存档文件',file),this.button('导入为独立副本',async()=>{const f=file.files[0];assert(f&&f.size<12000000,'请选择小于 12 MB 的 BBPresets 存档');await this.app.importArchive(JSON.parse(await f.text()));this.render();return '已导入独立副本，可在灵感或作者列表中选择；旧故事在废案中保留';}));
+        const file=input('','file');file.accept='.json,application/json';container.append(field('导入存档文件',file),this.button('导入为独立副本',async()=>{const f=file.files[0];assert(f&&f.size<12000000,'请选择小于 12 MB 的 BBPresets 存档');await this.app.importArchive(JSON.parse(await f.text()));this.render();return '已导入独立副本，可在灵感、世界任务或作者列表中选择；旧故事在废案中保留';}));
     }
     overview(){
         const a=this.app,s=a.inspiration?.data;this.content.append(el('h2','概览'));
-        const card=this.section('当前存档','灵感与作者分别选择，随账户保存；切换聊天会沿用当前选择。');
-        card.append(el('p','灵感：'+(s?.title??'尚未加载')),el('p','作者：'+a.author.data.title),el('p','待用灵感 '+(s?.records.filter(r=>r.status==='active').length??0)+' 条 · 作者建议 '+recordCounts(a.author.data).writing+' 条'),this.button('管理灵感',()=>this.open('inspirations')),this.button('选择 / 管理存档',()=>this.open('archives')),this.button('管理个性化作者',()=>this.open('authors')));this.content.append(card);
+        const card=this.section('当前存档','灵感、世界任务和作者分别保存；可将灵感和世界任务绑定到已确认的 BB-Memory 存档。');
+        card.append(el('p','灵感：'+(s?.title??'尚未加载')),el('p','世界任务：'+(a.worldTask?.data.title??'尚未加载')),el('p','作者：'+a.author.data.title),el('p','待用灵感 '+(s?.records.filter(r=>r.status==='active').length??0)+' 条 · 作者建议 '+recordCounts(a.author.data).writing+' 条'),this.button('管理灵感',()=>this.open('inspirations')),this.button('管理世界任务',()=>this.open('worldTasks')),this.button('选择 / 管理存档',()=>this.open('archives')),this.button('管理个性化作者',()=>this.open('authors')));this.content.append(card);
     }
     archives(){
-        const a=this.app;this.content.append(el('h2','存档'),el('p','“灵感”与“作者”是两类独立存档，切换其中一个不会更换另一个。资料自动保存到同一酒馆账户。','bbp-hint'));
-        for(const [label,wrapper] of [['灵感',a.inspiration],['作者',a.author]])if(wrapper){const d=wrapper.data,card=this.section('当前'+label+'存档',d.title),name=input(d.title);name.maxLength=300;
+        const a=this.app;this.content.append(el('h2','存档'),el('p','灵感、世界任务与作者各自独立。可将灵感和世界任务绑定到 BB-Memory 存档，未绑定的记忆槽不会改变当前选择。资料自动保存到同一酒馆账户。','bbp-hint'));
+        for(const [label,wrapper] of [['灵感',a.inspiration],['世界任务',a.worldTask],['作者',a.author]])if(wrapper){const d=wrapper.data,card=this.section('当前'+label+'存档',d.title),name=input(d.title);name.maxLength=300;
             card.append(field(label+'存档名称',name),this.button('保存'+label+'名称',async()=>{assert(name.value.trim(),'请填写名称');await a.edit(d.id,x=>{x.title=name.value.trim();return x;});this.render();return '名称已保存';}),this.button('保存'+label+'存档',async()=>{const result=await a.saveCurrent(d.id);this.render();return result;}),this.button('导出当前'+label,async()=>download(await a.exportScope(d.id),'BBPresets-'+d.type+'.json')));this.content.append(card);
         }
-        this.content.append(this.button('从服务器加载',async()=>{await a.refresh();this.render();return '已加载服务器上的灵感与作者资料';}));
+        this.content.append(this.button('从服务器加载',async()=>{await a.refresh();this.render();return '已加载服务器上的灵感、世界任务与作者资料';}));
+        this.memoryBindings();
         const search=input(this.archiveQuery??'');search.placeholder='名称或存档 ID';search.addEventListener('input',()=>{this.archiveQuery=search.value;this.updateArchiveCounts();});this.content.append(field('搜索存档',search));
         this.archiveList=el('div','','bbp-archive-counts');this.archiveList.tabIndex=0;this.archiveList.setAttribute('role','region');this.archiveList.setAttribute('aria-label','存档列表，可滚动');this.archiveSignature=null;this.content.append(this.archiveList);this.updateArchiveCounts();
         const create=this.section('新建 / 复制存档'),title=input('');title.maxLength=300;
-        create.append(field('新存档名称',title),this.button('新建灵感档',async()=>{const result=await a.createInspiration(title.value);this.render();return result;}),this.button('另存当前灵感',async()=>{const result=await a.createInspiration(title.value,{from:a.inspiration.data.id,select:false});this.render();return result;}),this.button('新建作者档',async()=>{await a.createAuthor(title.value);this.render();return '已新建并选用作者';}),this.button('复制当前作者',async()=>{await a.createAuthor(title.value,{from:a.author.data.id});this.render();return '已复制并选用作者';}));this.content.append(create);
-        const imports=el('details');imports.append(el('summary','导入灵感 / 作者 / 旧版存档'));this.archiveImport(imports);this.content.append(imports);
+        create.append(field('新存档名称',title),this.button('新建灵感档',async()=>{const result=await a.createInspiration(title.value);this.render();return result;}),this.button('另存当前灵感',async()=>{const result=await a.createInspiration(title.value,{from:a.inspiration.data.id,select:false});this.render();return result;}),this.button('新建世界任务档',async()=>{await a.createWorldTaskArchive(title.value);this.render();return '已新建并选用世界任务档';}),this.button('另存当前世界任务',async()=>{assert(a.worldTask,'世界任务档尚未加载');await a.createWorldTaskArchive(title.value,{from:a.worldTask.data.id,select:false});this.render();return '已另存世界任务，当前选择保持不变';}),this.button('新建作者档',async()=>{await a.createAuthor(title.value);this.render();return '已新建并选用作者';}),this.button('复制当前作者',async()=>{await a.createAuthor(title.value,{from:a.author.data.id});this.render();return '已复制并选用作者';}));this.content.append(create);
+        const imports=el('details');imports.append(el('summary','导入灵感 / 世界任务 / 作者 / 旧版存档'));this.archiveImport(imports);this.content.append(imports);
+    }
+    memoryBindings(){
+        const a=this.app,card=this.section('跟随 BB-Memory 存档','将当前灵感 / 世界任务档绑定到已确认的记忆槽。切换到已绑定槽后自动选择；未绑定槽保持当前选择，作者始终单独选择。'),state=el('p','','bbp-hint'),inspiration=check(true),worldTask=check(true),list=el('div');
+        card.append(state,field('绑定当前灵感档',inspiration),field('绑定当前世界任务档',worldTask));
+        const bind=this.button('绑定到当前记忆存档',async()=>{assert(a.memoryArchiveInfo?.confirmed,'当前记忆槽身份未确认，先在 BB-Memory 中选择存档，再刷新服务器');assert(inspiration.checked||worldTask.checked,'至少选择一类存档');await a.bindMemoryArchives({inspiration:inspiration.checked,worldTask:worldTask.checked});this.refreshMemoryBindings();return '所选存档已绑定，切换记忆槽时随之切换';});
+        card.append(bind,this.button('刷新记忆存档状态',async()=>{await a.refresh();this.render();return '已重新读取当前记忆槽和绑定';}),list);this.content.append(card);
+        let signature;
+        this.refreshMemoryBindings=()=>{
+            if(!card.isConnected)return;const info=a.memoryArchiveInfo,bindings=a.profile?.data.memoryArchiveBindings??[],current=JSON.stringify([info,bindings,a.inspiration?.data.id,a.worldTask?.data.id,a.repo.index?.commitId]);if(current===signature)return;signature=current;
+            state.textContent=info?.confirmed?'当前确认的记忆存档：'+info.title:'当前没有可确认身份的 BB-Memory 记忆槽；请先在 BB-Memory 中选用存档。';bind.disabled=!info?.confirmed;
+            inspiration.disabled=!a.inspiration;worldTask.disabled=!a.worldTask;list.replaceChildren();
+            for(const binding of bindings){const row=el('div','','bbp-binding-row');row.append(el('strong',binding.name??'已绑定记忆槽'),el('p',[binding.inspirationId?'灵感：'+(a.repo.index?.documents[binding.inspirationId]?.title??binding.inspirationId):'',binding.worldTaskId?'世界任务：'+(a.repo.index?.documents[binding.worldTaskId]?.title??binding.worldTaskId):''].filter(Boolean).join(' · '),'bbp-hint'),this.button('解除此记忆槽绑定',async()=>{await a.unbindMemoryArchives(binding.signature);this.refreshMemoryBindings();return '已解除绑定，当前存档选择保留';}));list.append(row);}
+            if(!bindings.length)list.append(el('p','尚未绑定记忆存档。','bbp-hint'));
+        };this.refreshMemoryBindings();
+    }
+    worldTasks(){
+        const a=this.app,doc=a.worldTask.data,view=a.settings.worldTaskView??'safe';
+        this.content.append(el('h2','世界任务'),el('p','用具有文学意味的任务塑造 NPC、展现世界特色，并留下值得思考的问题。正文只注入简短的下一阶段提醒，完整任务主体供后续安排使用。'));
+        if(this.editor?.target===doc.id){if(view==='spoiler'){this.recordEditor();return;}this.recordDrafts.set(doc.id+':'+this.editor.draft.id,this.editor);this.editor=null;}
+        const choices=Object.entries(a.repo.index.documents).filter(([,entry])=>entry.type==='worldTask'&&!entry.deleted).map(([id,entry])=>[id,entry.title]),picker=select(choices,doc.id);
+        this.content.append(field('当前世界任务存档',picker),this.button('切换世界任务档',async()=>{await a.selectWorldTask(picker.value);this.render();return '已切换世界任务档';}),this.button('新建 / 复制 / 导出世界任务档',()=>this.open('archives')));
+        const options=this.section('数量、显示与阶段识别'),capacity=input(a.settings.worldTaskCapacity??5,'number'),ai=check(a.settings.worldTaskAiEnabled===true),recognition=select([['delayed','隔一条 AI 回复识别'],['immediate','生成完成后立即识别']],a.settings.worldTaskRecognition??'delayed'),display=select([['safe','防剧透：任务名与条目数'],['brief','微剧透：加一句话简介'],['spoiler','剧透：下一阶段与完整主体']],view);capacity.min=1;capacity.max=50;
+        options.append(field('每档使用中的世界任务上限',capacity),field('允许 AI 提议新世界任务',ai),field('剧情发展识别深度',recognition),field('任务显示方式',display),this.button('保存世界任务设置',async()=>{await a.saveSettings({...a.settings,worldTaskCapacity:Number(capacity.value),worldTaskAiEnabled:ai.checked,worldTaskRecognition:recognition.value,worldTaskView:display.value},copy(a.settings));this.render();return '世界任务设置已保存；降低上限不会删除已有任务';}),el('p','新任务想法和灵感触发始终参考隔一条的稳定回复。已有任务可选择立即识别；达成、偏离或需要调整时调用安排 API。防剧透与微剧透模式不展开任务主体。','bbp-hint'));this.content.append(options);
+        if(!this.worldTaskDrafts.has(doc.id))this.worldTaskDrafts.set(doc.id,{theme:'',connection:a.settings.worldTaskConnection??'main'});
+        const draft=this.worldTaskDrafts.get(doc.id),theme=area(draft.theme),connection=select([['main','主 API'],['custom','副 API']],draft.connection);theme.rows=4;theme.maxLength=2000;theme.placeholder='想看到的主题、NPC、事件或情节。可留给 AI 发展空间。';theme.addEventListener('input',()=>{draft.theme=theme.value;});connection.addEventListener('change',()=>{draft.connection=connection.value;});
+        const generate=this.section('创建世界任务','AI 根据世界书、已确认记忆和当前上下文，设计任务名、主体与下一阶段提醒。');generate.append(field('主题 / 情节期待',theme),field('本次生成 API',connection),this.button('生成世界任务',async()=>{assert(a.worldTask?.data.id===doc.id,'世界任务档已切换，请回原档继续');const value=theme.value.trim();assert(value,'请先填写主题或情节期待');const result=await a.generateWorldTask(value,{connection:connection.value});if(!String(result??'').includes('失败')&&theme.value.trim()===value){draft.theme='';theme.value='';}return result??'世界任务已提交，请查看任务队列和列表';}));this.content.append(generate);
+        const count=el('p','','bbp-hint'),status=select([['active','使用中的任务'],['archived','已归档任务'],['','全部任务']],'active'),list=el('div','','bbp-world-tasks');this.content.append(field('任务状态',status),count,list);
+        const draw=()=>{
+            const current=a.documentFor(doc.id)?.data??doc,all=current.records.filter(r=>r.kind==='worldTask'),active=all.filter(r=>r.status==='active'),displayMode=a.settings.worldTaskView??'safe';count.textContent=`使用中 ${active.length} / ${a.settings.worldTaskCapacity??5} 个 · 已归档 ${all.length-active.length} 个`;list.replaceChildren();
+            for(const r of all.filter(r=>!status.value||r.status===status.value)){
+                const card=el('section','','bbp-card bbp-world-task');card.append(el('h3',r.title||'未命名世界任务'),el('p',`主体条目 ${r.blocks.length} 条${r.status==='archived'?' · 已归档':''}${r.locked?' · 整条保护':''}`,'bbp-hint'));
+                if(displayMode!=='safe')card.append(el('p',r.summary||'尚无一句话简介','bbp-prose'));
+                if(displayMode==='spoiler'){
+                    card.append(el('p','下一阶段：'+(r.nextNode||'暂未安排'),'bbp-next-node'));const details=el('details');details.append(el('summary','世界任务主体'),el('p',body(r),'bbp-prose'),el('small',`ID：${r.id}${current.excluded.includes(r.id)?' · 来源冲突，暂停注入':''}`));card.append(details,this.button('编辑 / 设置保护',()=>{this.editor=this.recordDrafts.get(doc.id+':'+r.id)??{target:doc.id,draft:copy(r),expected:copy(r)};this.render();}));
+                    if(r.status==='active')card.append(this.button('重新安排下一阶段',async()=>{await a.advanceWorldTask(r.id);return '下一阶段安排已提交，请查看任务队列';}));
+                }
+                card.append(this.button(r.status==='archived'?'恢复使用此任务':'归档此任务',async()=>{await a.saveRecord(doc.id,{...copy(r),status:r.status==='archived'?'active':'archived'},r);return r.status==='archived'?'任务已恢复使用':'任务已归档';}));list.append(card);
+            }
+            if(!list.children.length)list.append(el('p','当前筛选没有世界任务。','bbp-hint'));
+        };status.addEventListener('change',draw);let revision;this.refreshRecords=()=>{const current=[a.documentFor(doc.id)?.revision,a.settings.worldTaskCapacity,a.settings.worldTaskView].join(':');if(list.isConnected&&current!==revision){revision=current;draw();}};this.refreshRecords();
     }
     updateArchiveCounts(){
         if(!this.archiveList?.isConnected)return;
-        const a=this.app,query=(this.archiveQuery??'').trim().toLocaleLowerCase(),signature=JSON.stringify([a.repo.index?.commitId,a.inspiration?.data.id,a.author?.data.id,query]);
+        const a=this.app,query=(this.archiveQuery??'').trim().toLocaleLowerCase(),signature=JSON.stringify([a.repo.index?.commitId,a.inspiration?.data.id,a.worldTask?.data.id,a.author?.data.id,query]);
         if(signature===this.archiveSignature)return;this.archiveSignature=signature;
-        const sections=new Map([['inspiration',this.section('灵感存档')],['author',this.section('作者存档')],['story',el('details','','bbp-card')]]);
+        const sections=new Map([['inspiration',this.section('灵感存档')],['worldTask',this.section('世界任务存档')],['author',this.section('作者存档')],['story',el('details','','bbp-card')]]);
         sections.get('story').append(el('summary','废案 · 旧故事核 / 大纲'),el('p','旧功能已停止，资料仅供查看与导出。原有灵感已复制为独立档案，旧故事原文、保护和历史版本保留。'));
         for(const [id,entry] of Object.entries(a.repo.index?.documents??{})){
+            if(entry.deleted)continue;
             if(query&&![entry.title,id].some(v=>v.toLocaleLowerCase().includes(query)))continue;
-            const kind=entry.type==='profile'?'author':entry.type,current=id===(kind==='inspiration'?a.inspiration?.data.id:a.author?.data.id),card=this.section(entry.title);
+            const kind=entry.type==='profile'?'author':entry.type,current=id===(kind==='inspiration'?a.inspiration?.data.id:kind==='worldTask'?a.worldTask?.data.id:a.author?.data.id),card=this.section(entry.title);
             card.dataset.archiveId=id;const counts=entry.counts;
-            card.append(el('p',`${current?'当前使用 · ':''}${kind==='story'?'只读废案':kind==='inspiration'?'灵感存档':'作者存档'}${counts?' · 共 '+counts.total+' 条':''}`),el('p',`服务器保存：${when(entry.at)} · 版本 ${entry.revision}`,'bbp-hint'));
-            if(kind!=='story'){const load=this.button(current?'当前使用':kind==='inspiration'?'使用此灵感':'使用此作者',async()=>{if(kind==='inspiration')await a.selectInspiration(id);else await a.selectAuthor(id);this.render();return '已切换'+(kind==='inspiration'?'灵感':'作者')+'存档';});load.disabled=current;card.append(load);
-                if(kind==='inspiration'&&entry.saved)card.append(this.button('读取手动保存点',async()=>{const result=await a.loadSavedInspiration(id);this.render();return result;}));
+            card.append(el('p',`${current?'当前使用 · ':''}${kind==='story'?'只读废案':kind==='inspiration'?'灵感存档':kind==='worldTask'?'世界任务存档':'作者存档'}${counts?' · 共 '+counts.total+' 条':''}`),el('p',`服务器保存：${when(entry.at)} · 版本 ${entry.revision}`,'bbp-hint'));
+            if(kind!=='story'){const load=this.button(current?'当前使用':kind==='inspiration'?'使用此灵感':kind==='worldTask'?'使用此世界任务档':'使用此作者',async()=>{if(kind==='inspiration')await a.selectInspiration(id);else if(kind==='worldTask')await a.selectWorldTask(id);else await a.selectAuthor(id);this.render();return '已切换'+(kind==='inspiration'?'灵感':kind==='worldTask'?'世界任务':'作者')+'存档';});load.disabled=current;card.append(load);
+                if(['inspiration','worldTask'].includes(kind)&&entry.saved)card.append(this.button('读取手动保存点',async()=>{const result=kind==='inspiration'?await a.loadSavedInspiration(id):await a.loadSavedWorldTask(id);this.render();return result;}));
+                const remove=this.button(id==='profile'?'删除默认作者资料':'删除此'+(kind==='inspiration'?'灵感':kind==='worldTask'?'世界任务':'作者')+'存档',async()=>{const result=await a.deleteArchive(kind,id);this.render();return result??'已删除，保留的历史可在版本恢复中找回';});remove.classList.add('bbp-delete');card.append(remove);
             }else card.append(this.button('查看废案资料',async()=>{const doc=(await a.repo.load(id)).data,view=el('div');for(const r of doc.records)view.append(el('h4',r.title||r.kind),el('p',body(r),'bbp-prose'),...(r.nextNode?[el('p','旧节点：'+r.nextNode)]:[]));for(const f of doc.feedback)view.append(el('blockquote',f.quote),el('p',f.note));view.append(el('p',`保留历史 ${doc.history.length} 次 · 旧任务 ${doc.jobs.length+doc.proposals.length+(doc.retiredTasks?.length??0)} 项（均不运行）`));card.append(view);}),this.button('复制旧写作资料为作者',async()=>{await a.createAuthor(entry.title+' · 作者',{from:id});this.render();return '原资料保留，已选用复制的作者';}));
             card.append(this.button('导出此档',async()=>download(await a.exportScope(id))));sections.get(kind)?.append(card);
         }
@@ -247,12 +292,12 @@ export class Workbench {
         this.content.append(el('h2','灵感激发点'),el('p','把暂时不适合当前场景、以后很想写的素材留在这里。AI 也可克制地补充；不要求下一轮兑现，正文实际使用后才归档。'));
         const options=this.section('数量与注入'),capacity=input(a.settings.inspirationCapacity??20,'number'),count=input(a.settings.inspirationInjectCount??3,'number'),enabled=check(a.settings.inspirationAiEnabled!==false);capacity.min=1;capacity.max=200;count.min=0;count.max=20;
         options.append(field('待用灵感数量上限',capacity),field('每轮注入灵感条数',count),field('允许 AI 新增和修订灵感',enabled),this.button('保存灵感设置',async()=>{await a.saveSettings({...a.settings,inspirationCapacity:Number(capacity.value),inspirationInjectCount:Number(count.value),inspirationAiEnabled:enabled.checked},copy(a.settings));return '灵感设置已保存；降低上限不会删除已有素材';}),el('p','默认待用上限 20、每轮注入 3，可设为 0。用户期待优先，同组按创建顺序；字符预算不足时省略。AI 每轮最多新增 1 条，新增后的两轮暂停新增；关闭新增/修订后，实际使用回报仍可归档。','bbp-hint'));
-        const choices=Object.entries(a.repo.index.documents).filter(([,d])=>d.type==='inspiration').map(([id,d])=>[id,d.title]),picker=select(choices,a.inspiration.data.id);
+        const choices=Object.entries(a.repo.index.documents).filter(([,d])=>d.type==='inspiration'&&!d.deleted).map(([id,d])=>[id,d.title]),picker=select(choices,a.inspiration.data.id);
         this.content.append(field('当前灵感存档',picker),this.button('切换灵感',async()=>{await a.selectInspiration(picker.value);this.render();return '已切换灵感，作者保持不变';}),this.button('新建 / 复制 / 导出灵感档',()=>this.open('archives')),options);this.recordList(a.inspiration.data,false,'inspiration');
     }
     authors(){
         const a=this.app,doc=a.author.data;this.content.append(el('h2','个性化作者'),el('p','写作偏好保存在作者档案中。同一账户跨聊天沿用当前选择，也可切换为另一位作者。'));
-        const choices=[['profile','默认作者 · '+a.profile.data.title],...Object.entries(a.repo.index.documents).filter(([,d])=>d.type==='author').map(([id,d])=>[id,d.title])],picker=select(choices,doc.id);
+        const choices=[['profile','默认作者 · '+a.profile.data.title],...Object.entries(a.repo.index.documents).filter(([,d])=>d.type==='author'&&!d.deleted).map(([id,d])=>[id,d.title])],picker=select(choices,doc.id);
         this.content.append(field('当前个性化作者',picker),this.button('切换作者',async()=>{await a.selectAuthor(picker.value);this.render();return '作者已切换，灵感选择保持不变';}));
         const name=input(doc.title);this.content.append(field('作者名称',name),this.button('保存作者名称',async()=>{assert(name.value.trim(),'请填写作者名称');await a.edit(doc.id,d=>{d.title=name.value.trim();return d;});this.render();return '作者名称已保存';}),this.button('导出当前作者',async()=>download(await a.exportScope(doc.id),'BBPresets-author.json')));
         const manage=el('details'),title=input('');manage.append(el('summary','新建 / 复制 / 导入作者'),field('新作者名称',title),this.button('新建作者',async()=>{await a.createAuthor(title.value);this.render();}),this.button('复制当前作者',async()=>{await a.createAuthor(title.value,{from:doc.id});this.render();}));this.archiveImport(manage);this.content.append(manage);
@@ -287,7 +332,7 @@ export class Workbench {
     }
     recordEditor(){
         const e=this.editor,r=simplifyRecord(e.draft);this.content.append(el('h2',e.expected?'编辑条目':'新增条目'));
-        const compact=['storyline','inspiration'].includes(r.kind);
+        const compact=['storyline','inspiration','worldTask'].includes(r.kind);
         const allowedKinds=kinds.filter(([k])=>compact?k===r.kind:this.app.documentFor(e.target)?.data.type==='story'?!AUTHOR_KINDS.includes(k)&&!['storyline','inspiration'].includes(k):AUTHOR_KINDS.includes(k));
         const title=input(r.title),kind=select(allowedKinds,r.kind),truth=select(truths,r.truth),importance=select([['minor','普通更新'],['major','重要改变']],r.importance),status=select([['active','使用中'],['archived','归档，不注入']],r.status),locked=check(r.locked);
         for(const [key,node] of Object.entries({title,kind,truth,importance,status,locked}))node.addEventListener(node.type==='text'?'input':'change',()=>{r[key]=node.type==='checkbox'?node.checked:node.value;});
@@ -295,17 +340,19 @@ export class Workbench {
         const keywords=input((r.keywords??[]).join('，')),summary=area(r.summary??''),links=input((r.links??[]).join('，'));
         keywords.addEventListener('input',()=>{r.keywords=keywords.value.split(/[,，\n]/).map(s=>s.trim()).filter(Boolean);});summary.addEventListener('input',()=>{r.summary=summary.value;});links.addEventListener('input',()=>{r.links=links.value.split(/[,，\n]/).map(s=>s.trim()).filter(Boolean);});
         if(!compact)this.content.append(field('关键词（逗号分隔）',keywords),field('目录摘要',summary),field('关联条目 ID（逗号分隔）',links));
+        if(r.kind==='worldTask'){summary.maxLength=500;this.content.append(field('一句话任务简介（微剧透显示）',summary));}
         const advanced=el('details');advanced.append(el('summary','条目属性'),field('类别',kind),field('事实状态',truth),field('重要程度',importance),field('使用状态',status));this.content.append(advanced);
         const segmented=r.blocks.some(b=>b.locked),blocks=el('div','','bbp-blocks');
         for(const [index,b] of r.blocks.entries()){
             const wrap=el('section','','bbp-text-section'),text=area(b.text);text.rows=segmented?4:8;
-            text.addEventListener('input',()=>{b.text=text.value;});wrap.append(field(segmented?(b.locked?'保护段':'可编辑正文')+' '+(index+1):r.kind==='storyline'?'一句话故事核':r.kind==='inspiration'?'灵感内容':'正文',text));
+            text.addEventListener('input',()=>{b.text=text.value;});wrap.append(field(segmented?(b.locked?'保护段':'可编辑正文')+' '+(index+1):r.kind==='storyline'?'一句话故事核':r.kind==='inspiration'?'灵感内容':r.kind==='worldTask'?'世界任务主体（NPC / 世界特色 / 思想 / 情节安排）':'正文',text));
             if(b.locked){wrap.classList.add('bbp-protected');wrap.append(this.button('取消此段保护',()=>{b.locked=false;this.render();}));}
             else wrap.append(this.button('保护选中文字',()=>{protectSelection(r,b.id,text.selectionStart,text.selectionEnd);this.render();}));
             blocks.append(wrap);
         }
         this.content.append(blocks,this.button('增加保护段',()=>{r.blocks.push({id:uid(),text:'',locked:true});this.render();}));
         if(r.kind==='storyline'){const node=area(r.nextNode);node.maxLength=500;node.addEventListener('input',()=>{r.nextNode=node.value;});this.content.append(field('下一个节点',node),el('p','故事核最多 500 字符，建议用一句话写完。节点可以跨多轮保持不变；整条保护也会保护节点。','bbp-hint'));}
+        if(r.kind==='worldTask'){const node=area(r.nextNode??'');node.maxLength=500;node.addEventListener('input',()=>{r.nextNode=node.value;});this.content.append(field('下一阶段剧情发展（正文注入，最多 500 字符）',node),el('p','详细主体最多 12000 字符，供安排下一阶段时使用；下一阶段提醒需要简短。整条保护会同时保护任务名、简介、主体和下一阶段。','bbp-hint'));}
         this.content.append(this.button('保存条目',async()=>{await this.app.saveRecord(e.target,r,e.expected);this.recordDrafts.delete(e.target+':'+r.id);this.editor=null;this.render();return '条目已保存';}),this.button('返回列表',()=>{this.recordDrafts.set(e.target+':'+r.id,e);this.editor=null;this.render();}),el('p','返回列表保留本次编辑草稿；重新打开同一条目可继续。整条保护优先，AI 不能改写保护内容。','bbp-hint'));
     }
     feedback(){
@@ -324,7 +371,7 @@ export class Workbench {
         if(a.running||a.auxiliary)this.content.append(this.button('停止等待当前请求',()=>a.cancelRequests()));
         this.content.append(el('h3','进行中与待处理'));
         if(!a.jobs.length)this.content.append(el('p','当前没有排队或失败任务。','bbp-hint'));
-        for(const {job:j,target} of a.jobs){const d=a.documentFor(target).data,card=this.section(label(j),(d.type==='story'?'故事：':'作者：')+d.title);
+        for(const {job:j,target} of a.jobs){const d=a.documentFor(target).data,card=this.section(label(j),scopeName(d)+'：'+d.title);
             card.append(el('p',(j.kind==='initialization'?'角色卡 / 世界书 / 已确认记忆；聊天来源仅作变更校验':floorLabel(j.sources))+' · '+(j.state==='failed'?'失败':j.state==='held'?'等待手动运行':a.activeJob?.id===j.id?'处理中':'排队')+' · 尝试 '+j.attempts+' 次'+(j.error?' · '+j.error:'')),this.button('重试此任务',async()=>{const result=await a.retryJobs(j.id,target);this.render();return result;}));
             const raw=el('pre');raw.hidden=true;card.append(this.button('查看本设备模型响应（含剧透）',async()=>{const result=await a.diagnostic(j.id,target);raw.textContent=result?.text??'本设备没有响应记录（请求可能尚未返回，或来自其他设备）';raw.hidden=false;}),raw);this.content.append(card);
         }
@@ -332,8 +379,8 @@ export class Workbench {
         if(!a.proposals.length)this.content.append(el('p','新结果需要确认时会显示在这里。','bbp-hint'));
         if(!a.scopes.some(w=>w.data.proposals.length||w.data.history.length||w.data.conflicts.length))return;
         if(!this.authorGate())return;
-        for(const {job:p,target} of a.proposals){const d=a.documentFor(target).data,card=this.section(label(p)+' · '+when(p.at),(d.type==='story'?'故事：':'作者：')+d.title);
-            for(const c of p.changes){const before=d.records.find(r=>r.id===(c.id??c.record?.id));card.append(el('h4',c.record?.title??before?.title??c.id),el('pre','当前：\n'+body(before)),el('pre','建议：\n'+body(c.op==='put'?c.record:null)));}
+        for(const {job:p,target} of a.proposals){const d=a.documentFor(target).data,card=this.section(label(p)+' · '+when(p.at),scopeName(d)+'：'+d.title);
+            for(const c of p.changes){const before=d.records.find(r=>r.id===(c.id??c.record?.id));card.append(el('h4',c.record?.title??before?.title??c.id),el('pre','当前：\n'+changedBody(before)),el('pre','建议：\n'+changedBody(c.op==='put'?c.record:null)));}
             card.append(this.button('应用此提案',async()=>{await a.reviewProposal(p.id,true,target);this.render();}),this.button('拒绝此提案',async()=>{await a.reviewProposal(p.id,false,target);this.render();}));this.content.append(card);
         }
         for(const scope of a.scopes){const d=scope.data;
@@ -341,39 +388,41 @@ export class Workbench {
             if(!d.history.length&&!d.retiredTasks?.length)continue;
             const history=el('details','','bbp-card');history.append(el('summary','变更历史 · '+d.title+'（'+d.history.length+' 次）'));
             if(d.retiredTasks?.length)history.append(el('p',d.retiredTasks.length+' 个旧版任务已停用，记录随存档保留。','bbp-hint'));
-            for(const h of [...d.history].reverse().slice(0,30)){const details=el('details');details.append(el('summary',when(h.at)+' · '+h.origin+' · '+h.changes.length+' 个变更'));for(const c of h.changes)details.append(el('pre',(c.after?.title??c.before?.title??c.id)+'\n之前：'+body(c.before)+'\n之后：'+body(c.after)));history.append(details);}this.content.append(history);
+            for(const h of [...d.history].reverse().slice(0,30)){const details=el('details');details.append(el('summary',when(h.at)+' · '+h.origin+' · '+h.changes.length+' 个变更'));for(const c of h.changes)details.append(el('pre',(c.after?.title??c.before?.title??c.id)+'\n之前：'+changedBody(c.before)+'\n之后：'+changedBody(c.after)));history.append(details);}this.content.append(history);
         }
     }
     settings(){
         const a=this.app,s=copy(a.settings),fields={};this.content.append(el('h2','设置'),el('p','连接、生成规则与资料联动统一在这里设置；保存后生效。','bbp-hint'));
-        const switches=this.section('正文注入','两个开关相互独立，可只开一个，也可组合或全部关闭。关闭后保留资料，并停止该类正文自动维护。');
-        for(const [k,label] of [['injectAuthor','注入作者'],['injectInspiration','注入灵感激发点']]){fields[k]=check(s[k]!==false);switches.append(field(label,fields[k]));}this.content.append(switches);
-        const main=this.section('主 API','点评可使用酒馆当前主连接，无需重复填写地址或 Key。灵感维护随正文控制完成，无额外请求。');
+        const switches=this.section('正文注入','三个开关相互独立，可组合或全部关闭。关闭后保留资料，并停止该类正文自动维护。');
+        for(const [k,label] of [['injectAuthor','注入作者'],['injectInspiration','注入灵感激发点'],['injectWorldTask','注入世界任务下一阶段']]){fields[k]=check(s[k]!==false);switches.append(field(label,fields[k]));}this.content.append(switches);
+        const main=this.section('主 API','点评、灵感安排与世界任务可使用酒馆当前主连接，无需重复填写地址或 Key。正文只发送简短触发和阶段回报，详细安排另发请求。');
         main.append(this.button('测试主 API',()=>a.testConnection({...a.settings,connection:'main'})),el('p','测试只发送简短连接请求。主 API 达到等待时长后提示“响应较慢”，继续接收原结果；停止等待会保留输入，不强行中断酒馆请求。','bbp-hint'));this.content.append(main);
-        const connection=this.section('点评处理连接','剧情默认主 API，写作默认副 API；已有写作连接设置保留。每条点评也可单独选择。所有点评都保存到当前作者。');
+        const connection=this.section('处理连接','剧情默认主 API，写作默认副 API；已有写作连接设置保留。每条点评也可单独选择。所有点评都保存到当前作者。');
         fields.connection=select([['main','复用酒馆主连接'],['custom','独立副 API（OpenAI 兼容）']],s.connection);connection.append(field('写作点评默认 API',fields.connection));fields.plotConnection=select([['main','主 API'],['custom','副 API']],s.plotConnection??'main');connection.append(field('剧情点评默认 API',fields.plotConnection));
         const custom=el('div');fields.endpoint=input(s.endpoint);fields.model=input(s.model);const key=input('','password');key.autocomplete='off';key.placeholder=a.host.key?'已保存在本设备；留空保留':'仅保存在本设备，不随导出同步';custom.append(field('独立 API 地址（支持 /v1 或完整 /chat/completions）',fields.endpoint),field('独立模型名称',fields.model),field('独立 API Key',key),this.button('清除本设备 API Key',async()=>{await a.host.setKey('');key.value='';}));
-        const showCustom=()=>{custom.hidden=fields.connection.value!=='custom'&&fields.plotConnection.value!=='custom';};fields.connection.addEventListener('change',showCustom);fields.plotConnection.addEventListener('change',showCustom);showCustom();connection.append(custom);
+        fields.inspirationConnection=select([['main','主 API'],['custom','副 API']],s.inspirationConnection??'main');connection.append(field('灵感详细安排 API',fields.inspirationConnection));fields.worldTaskConnection=select([['main','主 API'],['custom','副 API']],s.worldTaskConnection??'main');connection.append(field('世界任务生成 / 推进 API',fields.worldTaskConnection));
+        const showCustom=()=>{custom.hidden=![fields.connection,fields.plotConnection,fields.inspirationConnection,fields.worldTaskConnection].some(n=>n.value==='custom');};for(const n of [fields.connection,fields.plotConnection,fields.inspirationConnection,fields.worldTaskConnection])n.addEventListener('change',showCustom);showCustom();connection.append(custom);
         const values=()=>({...s,...Object.fromEntries(Object.entries(fields).map(([k,n])=>[k,n.type==='checkbox'?n.checked:n.type==='number'?Number(n.value):n.value]))});
         connection.append(this.button('测试点评连接',()=>a.testConnection(values(),key.value||a.host.key)),el('p','测试使用当前表单，不提交故事；测试成功后请保存设置。独立 API 需允许浏览器跨域，Key 仅在本设备保存。','bbp-hint'));this.content.append(connection);
         const rules=this.section('生成与审阅');fields.mode=select([['semi','半自动：重要变更先审阅'],['auto','全自动：自动修改全部未保护资料'],['manual','全手动：只按按钮运行，变更先审阅']],s.mode);rules.append(field('编辑权限',fields.mode));
         for(const [k,label] of [['enabled','启用 BBPresets']]){fields[k]=check(s[k]);rules.append(field(label,fields[k]));}
         const number=(container,k,label,min,max)=>{const n=fields[k]=input(s[k],'number');n.min=min;n.max=max;container.append(field(label,n));};
         number(rules,'feedbackThreshold','积累多少条待发送点评后总结',1,100);this.content.append(rules);
+        const world=this.section('世界任务','触发提示词与下一阶段提醒保持简短；详细安排复用世界书和已确认记忆资料。');number(world,'worldTaskCapacity','每档使用中的世界任务数量上限',1,50);fields.worldTaskAiEnabled=check(s.worldTaskAiEnabled===true);fields.worldTaskRecognition=select([['delayed','隔一条 AI 回复识别（避开最新重 roll）'],['immediate','生成完成后立即识别']],s.worldTaskRecognition??'delayed');fields.worldTaskView=select([['safe','防剧透：任务名与条目数'],['brief','微剧透：再显示一句话简介'],['spoiler','剧透：显示下一阶段和任务主体']],s.worldTaskView??'safe');world.append(field('允许 AI 提议新世界任务',fields.worldTaskAiEnabled),field('剧情发展识别深度',fields.worldTaskRecognition),field('世界任务显示方式',fields.worldTaskView),el('p','AI 新世界任务想法和灵感触发始终读取隔一条的稳定回复；识别深度只控制已有世界任务的阶段回报。','bbp-hint'));this.content.append(world);
         const budget=el('details','','bbp-card');budget.append(el('summary','上下文预算与等待时长'));
-        for(const [k,label,min,max] of [['maxInputChars','点评材料字符预算（不含固定指令）',2000,150000],['injectionChars','正文注入字符预算',500,40000],['timeoutSeconds','主 API 慢响应提醒 / 副 API 超时（秒）',10,300]])number(budget,k,label,min,max);
+        for(const [k,label,min,max] of [['maxInputChars','任务 / 灵感 / 点评材料字符预算（不含固定指令）',2000,150000],['injectionChars','正文注入字符预算',500,40000],['timeoutSeconds','主 API 慢响应提醒 / 副 API 超时（秒）',10,300]])number(budget,k,label,min,max);
         budget.append(el('p','主 API 超过此时长继续等待原请求；副 API 超时会取消当次请求。短暂网络故障最多重试两次。','bbp-hint'));this.content.append(budget);
         const appearance=this.section('界面 · 本设备');const showBall=check(this.ui.showBall);showBall.addEventListener('change',()=>this.setBallVisible(showBall.checked));appearance.append(field('显示悬浮球（本设备，立即生效）',showBall),this.button('重置悬浮球位置',()=>{showBall.checked=true;return this.resetBall();}));this.content.append(appearance);
         const save=this.button('保存设置',async()=>{await a.saveSettings(values(),s);Object.assign(s,copy(a.settings));if(key.value)await a.host.setKey(key.value);key.value='';return '设置已保存';});save.classList.add('bbp-primary');this.content.append(save,this.button('载入已保存设置',()=>this.render()));
     }
     prompts(){
         const a=this.app;this.content.append(el('h2','全部提示词'),el('p','逐条展开后可编辑并保存。{{material}} 等占位符会填入本次资料；编辑不会解除保护或格式校验。提示词随账户保存，导出仅含提示词。'));
-        this.content.append(el('p','v0.5.8 使用独立的作者/灵感说明与 version:4 灵感协议。旧大纲和正文模板保留在导出文件中，不再调用。','bbp-hint'));
+        this.content.append(el('p','v0.5.9 使用简短的灵感 / 世界任务触发和 version:5 正文协议，详细安排独立请求。旧大纲和正文模板保留在导出文件中，不再调用。','bbp-hint'));
         const file=input('','file');file.accept='.json,application/json';
-        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.8.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
-        const promptGroups=[['通用规则',['system','authorContract']],['划线评',['feedback','plotAuthorFeedback']],['正文与灵感',['inspirationInjection','inspirationControl']],['连接',['connectionTest']]];
+        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.9.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
+        const promptGroups=[['通用规则',['system','authorContract','worldTaskContract']],['划线评',['feedback','plotAuthorFeedback']],['正文触发与注入',['creativeInjectionV5','creativeControlV5']],['灵感安排',['inspirationPlan']],['世界任务安排',['worldTaskCreate','worldTaskAdvance']],['连接',['connectionTest']]];
         for(const [title,keys] of promptGroups){const group=el('section','','bbp-prompt-group');group.append(el('h3',title));this.content.append(group);
-        for(const key of keys){const entry=PROMPTS[key];
+        for(const key of keys){const entry=PROMPTS[key];if(!entry)continue;
             const card=el('details','','bbp-card'),custom=Object.hasOwn(a.settings.prompts??{},key),base=a.settings.prompts?.[key];
             card.append(el('summary',entry.title+(custom?' · 已自定义':' · 默认')));
             const text=area(this.promptDrafts[key]??base??entry.text);text.rows=10;text.readOnly=true;text.setAttribute('aria-label',entry.title);
@@ -395,7 +444,8 @@ export class Workbench {
         this.content.append(this.button('重新读取服务器',async()=>{await a.refresh();this.render();}));
         const repair=el('details','','bbp-card');repair.append(el('summary','存储故障修复'),el('p','仅用于索引损坏或缺失时恢复服务器备份；日常接续请使用重新读取服务器。','bbp-hint'),this.button('主索引损坏时恢复备份',async()=>{await a.repo.recoverIndex();await a.refresh();this.render();}));this.content.append(repair);
         if(a.profile)this.content.append(this.button('导出全部资料',async()=>download(await a.exportAll())));
-        if(a.profile){const scopes=[['profile','默认作者与账户设置'],...(a.author.data.id!=='profile'?[[a.author.data.id,'当前作者']]:[]),...(a.inspiration?[[a.inspiration.data.id,'当前灵感']]:[])],target=select(scopes,this.versionTarget??a.inspiration?.data.id??'profile');if(!target.value)target.value='profile';target.addEventListener('change',()=>{this.versionTarget=target.value;this.render();});const id=target.value,versions=a.repo.index.documents[id]?.history??[],picker=select(versions.map((v,i)=>[String(i),`版本 ${v.revision} · ${when(v.at)}`]));this.content.append(field('恢复作用域',target),field('历史版本',picker),this.button('查看所选版本内容',async()=>{assert(versions.length,'尚无历史版本');const epoch=a.epoch,version=await a.repo.loadVersion(id,versions[Number(picker.value)]);assert(epoch===a.epoch,'故事已切换，请重新查看版本');const card=el('section','','bbp-card');card.append(el('h3',`版本 ${version.revision} · 资料内容`));for(const r of version.data.records)card.append(el('h4',r.title),el('pre',body(r)));this.content.append(card);}),this.button('恢复所选版本',async()=>{assert(versions.length,'尚无历史版本');await a.restore(id,versions[Number(picker.value)]);this.render();}),el('p','恢复会新建版本，保留已有历史和点评；当前保留文字若与旧版本冲突，恢复将停止。','bbp-hint'));}
+        if(a.profile){const scopes=[['profile','默认作者与账户设置'],...(a.author.data.id!=='profile'?[[a.author.data.id,'当前作者']]:[]),...(a.inspiration?[[a.inspiration.data.id,'当前灵感']]:[]),...(a.worldTask?[[a.worldTask.data.id,'当前世界任务']]:[])],target=select(scopes,this.versionTarget??a.inspiration?.data.id??'profile');if(!target.value)target.value='profile';target.addEventListener('change',()=>{this.versionTarget=target.value;this.render();});const id=target.value,versions=a.repo.index.documents[id]?.history??[],picker=select(versions.map((v,i)=>[String(i),`版本 ${v.revision} · ${when(v.at)}`]));this.content.append(field('恢复作用域',target),field('历史版本',picker),this.button('查看所选版本内容',async()=>{assert(versions.length,'尚无历史版本');const epoch=a.epoch,version=await a.repo.loadVersion(id,versions[Number(picker.value)]);assert(epoch===a.epoch,'故事已切换，请重新查看版本');const card=el('section','','bbp-card');card.append(el('h3',`版本 ${version.revision} · 资料内容`));for(const r of version.data.records)card.append(el('h4',r.title),el('pre',body(r)));this.content.append(card);}),this.button('恢复所选版本',async()=>{assert(versions.length,'尚无历史版本');await a.restore(id,versions[Number(picker.value)]);this.render();}),el('p','恢复会新建版本，保留已有历史和点评；当前保留文字若与旧版本冲突，恢复将停止。','bbp-hint'));}
+        const deleted=Object.entries(a.repo.index?.documents??{}).filter(([,entry])=>entry.deleted);if(deleted.length){const list=el('details','','bbp-card');list.append(el('summary','已删除存档（'+deleted.length+' 个，可恢复）'));for(const [id,entry] of deleted)list.append(el('p',entry.title+' · '+(entry.type==='worldTask'?'世界任务':entry.type==='inspiration'?'灵感':'作者')),this.button('恢复 '+entry.title,async()=>{await a.restoreDeletedArchive(id);this.render();return '已恢复存档，可到存档页手动选择';}));this.content.append(list);}
         this.content.append(this.button('检查本设备未完成保存',async()=>{const rows=await a.recovery.list();const list=el('section','','bbp-card');list.append(el('h3',`待恢复副本 ${Object.keys(rows).length} 份`));for(const [id,p] of Object.entries(rows)){const archive={format:'bbpresets-export',schema:1,documents:[p.data]};list.append(el('p',`${p.data.title} · ${when(p.at)}`),this.button('导出此恢复副本',()=>download(archive,`BBPresets-recovery-${id}.json`)),this.button('恢复为独立副本',async()=>{await a.importArchive(archive);this.render();}));}this.content.append(list);}));
     }
     destroy(){this.destroyed=true;this.observer.disconnect();this.resizeObserver.disconnect();globalThis.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('resize',this.onResize);globalThis.visualViewport?.removeEventListener('scroll',this.onResize);document.removeEventListener('keydown',this.onKey);document.removeEventListener('pointerup',this.onSelection);this.app.listeners.delete(this.onChange);this.surface.remove();this.entry.remove();}

@@ -9,6 +9,7 @@ function validateIndex(index) {
     for (const [id, d] of Object.entries(index.documents)) {
         assert(validId(id) && allowedFile(d.file) && Number.isInteger(d.revision) && Array.isArray(d.history), '服务器文档索引无效');
         for (const h of d.history) assert(allowedFile(h.file) && Number.isInteger(h.revision), '历史版本路径无效');
+        if(d.deleted!==undefined)assert(d.deleted&&Number.isFinite(d.deleted.at)&&Number.isInteger(d.deleted.revision)&&d.deleted.revision===d.revision,'已删除存档标记无效');
         if(d.saved)assert(allowedFile(d.saved.file)&&Number.isInteger(d.saved.revision)&&Number.isFinite(d.saved.at),'手动保存点无效');
     }
     return index;
@@ -29,7 +30,7 @@ export class Repository {
     }
     async load(id) {
         if (!this.index) await this.refresh();
-        const entry=this.index.documents[id]; if (!entry) return null;
+        const entry=this.index.documents[id]; if (!entry||entry.deleted) return null;
         return this.loadVersion(id,entry);
     }
     async loadVersion(id,entry) {
@@ -61,6 +62,7 @@ export class Repository {
             assert(guard(), '页面、故事或任务已变化，停止旧任务保存');
             const remote=validateIndex(await this.transport.read(INDEX) ?? empty());
             if (this.index) assert(remote.commitId === this.index.commitId, '服务器已有更新，请刷新后重试；本次修改已保留在本机恢复区');
+            assert(!remote.documents[data.id]?.deleted,'该存档已删除，不能由晚到保存重新启用；请先恢复存档');
             assert((remote.documents[data.id]?.revision ?? 0) === expectedRevision, '资料版本已变化，不能覆盖');
             const revision=expectedRevision+1, file=`bbpresets-doc-${data.id}-${uid()}.json`;
             const snapshot={schema:1,id:data.id,revision,data:copy(data),digest:await hash(JSON.stringify(data)),at:Date.now()};
@@ -87,6 +89,34 @@ export class Repository {
             this.onStatus('saved');
             return {data:copy(data),revision};
         } catch(error) { this.onStatus('error',error); throw error; }
+    }
+    // Soft deletion retains every snapshot and its stable identity. Old clients cannot revive it by saving.
+    delete(id,expectedRevision,guard=()=>true) {
+        const work=this.queue.then(()=>this.setDeleted(id,expectedRevision,true,guard));
+        this.queue=work.catch(()=>{});return work;
+    }
+    restoreDeleted(id,expectedRevision,guard=()=>true) {
+        const work=this.queue.then(()=>this.setDeleted(id,expectedRevision,false,guard));
+        this.queue=work.catch(()=>{});return work;
+    }
+    async setDeleted(id,expectedRevision,deleted,guard) {
+        assert(validId(id),'存档身份无效');this.onStatus('saving');
+        try {
+            assert(guard(),'存档选择已变化，停止操作');
+            const remote=validateIndex(await this.transport.read(INDEX)??empty());
+            if(this.index)assert(remote.commitId===this.index.commitId,'服务器已有更新，请刷新后重试');
+            const entry=remote.documents[id];assert(entry&&entry.revision===expectedRevision,'存档版本已变化，不能删除或恢复');
+            assert(['author','inspiration','worldTask'].includes(entry.type),'只能删除作者、灵感或世界任务存档');
+            assert(Boolean(entry.deleted)!==deleted,deleted?'该存档已删除':'该存档未被删除');
+            const next=copy(remote);next.revision++;next.commitId=uid();
+            if(deleted)next.documents[id].deleted={at:Date.now(),revision:entry.revision};else delete next.documents[id].deleted;
+            const latest=validateIndex(await this.transport.read(INDEX)??empty());
+            assert(latest.commitId===remote.commitId,'发布前发现服务器已更新，请刷新后重试');
+            assert(guard(),'存档选择已变化，停止操作');
+            await this.writeVerified(BACKUP,remote);
+            assert(guard(),'发布前存档选择已变化，停止操作');
+            await this.writeVerified(INDEX,next);this.index=next;this.onStatus('saved');return copy(next.documents[id]);
+        } catch(error){this.onStatus('error',error);throw error;}
     }
     async recoverIndex() {
         await this.queue;

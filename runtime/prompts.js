@@ -32,25 +32,28 @@ export function maintenancePrompt(job,story,profile,material=maintenanceMaterial
     const key=job.kind==='feedback'&&job.feedback?.some(f=>f.category==='plot')?'plotAuthorFeedback':job.kind==='outline'&&job.feedback?.some(f=>f.category==='plot')?'plotFeedback':{world:'legacyWorld',reflection:'legacyReflection',feedback:'feedback',initialization:'initialization',outline:'outline'}[job.kind];
     return promptText(profile.settings,key,{contract:promptText(profile.settings,job.kind==='feedback'?'authorContract':'changeContract'),material:JSON.stringify(material)});
 }
-export function injection(profile,inspiration,settings,context={sources:[],rows:[],chatKey:''},token='') {
-    const features={author:settings.injectAuthor!==false,story:false,inspiration:settings.injectInspiration!==false};
+export function injection(profile,inspiration,settings,context={sources:[],rows:[],chatKey:''},token='',worldTask=null) {
+    const modern=worldTask?.type==='worldTask';
+    const features={author:settings.injectAuthor!==false,story:false,inspiration:settings.injectInspiration!==false,...(modern?{worldTask:settings.injectWorldTask!==false}:{})};
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
     // Only an independently selected inspiration archive can participate in generation.
     const doc=inspiration?.type==='inspiration'?inspiration:{records:[],excluded:[],controls:[]};
-    const guidelines=[],items=[],used=[],room=inspirationRoom(doc,settings,context);
-    const control=token&&inspiration?.type==='inspiration'&&features.inspiration?promptText(settings,'inspirationControl',{token}):'';
+    const tasks=[],guidelines=[],items=[],used=[],room=inspirationRoom(doc,settings,context);
+    const control=token&&(features.inspiration||modern&&features.worldTask)?promptText(settings,modern?'creativeControlV5':'inspirationControl',{token}):'';
     const json=value=>JSON.stringify(value).replaceAll('<','\\u003c').replaceAll('>','\\u003e');
     const render=()=>{
         const chunks=[];
         if(features.author)chunks.push(`<BBPresets_WritingGuidelines>\n${json({author:profile.title,guidelines})}\n</BBPresets_WritingGuidelines>`);
+        if(modern&&features.worldTask)chunks.push(`<BBPresets_WorldTask>\n${json({tasks,canCreate:settings.worldTaskAiEnabled===true&&worldTask.records.filter(r=>r.status==='active').length<(settings.worldTaskCapacity??5)})}\n</BBPresets_WorldTask>`);
         if(features.inspiration)chunks.push(`<BBPresets_Inspiration>\n${json({items,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`);
-        return chunks.length?promptText(settings,'inspirationInjection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:''):'';
+        return chunks.length?promptText(settings,modern?'creativeInjectionV5':'inspirationInjection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:''):'';
     };
     assert(render().length<=settings.injectionChars,'正文注入预算不足以包含说明和灵感协议，请提高预算');
     let omitted=0;
     const add=(list,item)=>{list.push(item);if(render().length>settings.injectionChars){list.pop();omitted++;return false;}used.push(item.id);return true;};
+    if(modern&&features.worldTask)for(const r of active(worldTask))add(tasks,{id:r.id,title:r.title,nextNode:r.nextNode,locked:r.locked||r.blocks.some(b=>b.locked)});
     if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))add(guidelines,{id:r.id,title:r.title,truth:r.truth,text:storyText(r)});
     if(features.inspiration)for(const r of active(doc).sort((a,b)=>Number(b.creator==='user')-Number(a.creator==='user'))){if(items.length>=(settings.inspirationInjectCount??3))break;add(items,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)});}
-    return {text:render(),features,omitted,visibleIds:[],lineIds:[],inspirationIds:items.map(r=>r.id),recordIds:used,counts:{outline:0,writing:guidelines.length,directory:0,inspiration:items.length},controlEnabled:Boolean(control)};
+    return {text:render(),features,omitted,visibleIds:[],lineIds:[],inspirationIds:items.map(r=>r.id),worldTaskIds:tasks.map(r=>r.id),recordIds:used,counts:{outline:0,writing:guidelines.length,directory:0,inspiration:items.length,...(modern?{worldTask:tasks.length}:{})},controlEnabled:Boolean(control)};
 }
 export function aiView(record){const r=copy(record);delete r.locked;delete r.joiner;delete r.origin;delete r.sources;delete r.creator;r.blocks.forEach(b=>delete b.locked);return r;}

@@ -4,24 +4,23 @@ import {injection,maintenancePrompt,maintenanceMaterial,parseChanges} from './pr
 import {retryRequest,transient} from './network.js';
 import {promptText,exportPrompts,importPrompts} from '../core/prompt-templates.js';
 import {responseText} from '../core/json.js';
-import {parseControl} from '../core/outline.js';
 import {sourcePrefixes} from '../core/source-prefix.js';
 import {inspirationFrom,retireTasks} from '../core/inspiration.js';
-import {storyControlChanges} from '../core/story.js';
+import {WorldTaskRuntime} from './world-tasks.js';
 
 const inspirationHash=doc=>hash(JSON.stringify({records:doc.records,excluded:doc.excluded}));
 
 export class BBPresetsApp {
     constructor(host,{notify=()=>{},visible=()=>!globalThis.document?.hidden}={}) {
         this.host=host;this.notify=notify;this.visible=visible;this.epoch=0;this.story=null;this.inspiration=null;this.profile=null;this.listeners=new Set();this.edits=Promise.resolve();this.running=null;this.controller=null;this.error='';this.status='loading';this.lastInjection={text:'',omitted:0};this.stats={calls:0,success:0,failed:0,usage:null};this.ready=false;
-        this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';this.generation=null;this.controlTask=Promise.resolve();this.controlStatus='';this.waitingOutline=false;
+        this.worldTask=null;this.worldRuntime=new WorldTaskRuntime(this);this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';this.generation=null;this.controlTask=Promise.resolve();this.controlStatus='';this.waitingOutline=false;
     }
     changed(){for(const fn of this.listeners)fn();}
     report(error){this.error=error.message??String(error);this.notify(this.error,'error');this.changed();}
     get settings(){return this.profile?.data.settings;}
     get author(){return this.authorProfile??this.profile;}
-    get scopes(){return [this.inspiration,this.author].filter(Boolean);}
-    documentFor(id){return [this.profile,this.inspiration,this.authorProfile].find(w=>w?.data.id===id);}
+    get scopes(){return [this.inspiration,this.worldTask,this.author].filter(Boolean);}
+    documentFor(id){return [this.profile,this.inspiration,this.worldTask,this.authorProfile].find(w=>w?.data.id===id);}
     get jobs(){return this.scopes.flatMap(w=>w.data.jobs.map(job=>({job,target:w.data.id})));}
     get proposals(){return this.scopes.flatMap(w=>w.data.proposals.map(job=>({job,target:w.data.id})));}
     authorMaterial(){return {...copy(this.author.data),settings:copy(this.settings)};}
@@ -52,7 +51,8 @@ export class BBPresetsApp {
             await this.controlTask;
             if(this.needsRefresh&&!this.running&&!this.auxiliary){await this.resume();return;}
             if(!this.ready)return;
-            await this.host.flushSourceIds?.();await this.maybeSummarizeFeedback();if(this.jobs.some(({job})=>job.state==='queued'))await this.drain();
+            await this.followMemory();
+            await this.worldRuntime.flushOutbox();await this.host.flushSourceIds?.();await this.maybeSummarizeFeedback();if(this.jobs.some(({job})=>job.state==='queued'))await this.drain();
         }catch(e){this.report(e);}
     }
     background(){this.needsRefresh=true;this.changed();}
@@ -82,7 +82,7 @@ export class BBPresetsApp {
     }
     async refresh() {
         this.suspend();const epoch=this.epoch,identity=this.host.identity();
-        this.story=null;this.inspiration=null;this.selectedKey=null;this.currentSources=[];this.changed();await this.edits;await this.repo.refresh();
+        this.story=null;this.inspiration=null;this.worldTask=null;this.selectedKey=null;this.currentSources=[];this.changed();await this.edits;await this.repo.refresh();
         let profile=await this.repo.load('profile');
         if(!profile)profile=await this.repo.save(newDocument('profile','默认作者','profile'),0,()=>this.epoch===epoch);
         if(epoch!==this.epoch)return;
@@ -98,12 +98,15 @@ export class BBPresetsApp {
             profile=await this.repo.save(next,profile.revision,()=>epoch===this.epoch);
         }
         const inspiration=await this.upgrade(await this.repo.load(inspirationId),epoch);assert(inspiration?.data.type==='inspiration','选定灵感档不存在，请从版本恢复检查存档');
+        let worldTaskId=profile.data.activeWorldTaskId;
+        if(!worldTaskId){worldTaskId='world-task-default';if(this.repo.index.documents[worldTaskId]?.deleted)worldTaskId=uid();if(!this.repo.index.documents[worldTaskId])await this.repo.save(newDocument('worldTask','默认世界任务',worldTaskId),0,()=>epoch===this.epoch);const next=copy(profile.data);next.activeWorldTaskId=worldTaskId;profile=await this.repo.save(next,profile.revision,()=>epoch===this.epoch);}
+        const worldTask=await this.upgrade(await this.repo.load(worldTaskId),epoch);assert(worldTask?.data.type==='worldTask','选定世界任务档不存在，请恢复存档');
         const authorId=profile.data.activeAuthorId;let authorProfile=null;
         if(authorId&&authorId!=='profile'){authorProfile=await this.upgrade(await this.repo.load(authorId),epoch);assert(authorProfile?.data.type==='author','选定作者不存在，请恢复作者存档');}
         if(epoch!==this.epoch)return;
-        this.profile=profile;this.authorProfile=authorProfile;this.inspiration=inspiration;this.selectedKey=identity.chatKey;
+        this.profile=profile;this.authorProfile=authorProfile;this.inspiration=inspiration;this.worldTask=worldTask;this.selectedKey=identity.chatKey;
         this.host.controlFilter?.(this.settings.enabled);this.ready=true;this.error='';this.status='saved';
-        await this.reconcile();this.changed();
+        await this.reconcile();await this.followMemory();this.changed();
     }
     edit(target,transform,{guard=()=>true}={}) {
         const epoch=this.epoch;
@@ -115,7 +118,7 @@ export class BBPresetsApp {
             if(same(next,wrapper.data))return wrapper;
             const saved=await this.repo.save(next,wrapper.revision,()=>epoch===this.epoch&&guard());
             assert(epoch===this.epoch&&guard(),'保存完成时资料已变化，请在原存档查看结果');
-            if(target==='profile')this.profile=saved;else if(target===this.authorProfile?.data.id)this.authorProfile=saved;else this.inspiration=saved;
+            if(target==='profile')this.profile=saved;else if(target===this.authorProfile?.data.id)this.authorProfile=saved;else if(target===this.worldTask?.data.id)this.worldTask=saved;else this.inspiration=saved;
             this.changed();return saved;
         });
         this.edits=work.catch(()=>{});return work;
@@ -138,16 +141,17 @@ export class BBPresetsApp {
         try{
             await this.edits;await this.repo.refresh();
             const profile=await this.upgrade(await this.repo.load('profile'),epoch);assert(guard(),'切换存档期间资料已变化');
-            const authorId=type==='author'?id:(profile.data.activeAuthorId??'profile'),inspirationId=type==='inspiration'?id:profile.data.activeInspirationId;
+            const authorId=type==='author'?id:(profile.data.activeAuthorId??'profile'),inspirationId=type==='inspiration'?id:profile.data.activeInspirationId,worldTaskId=type==='worldTask'?id:profile.data.activeWorldTaskId;
             const author=authorId==='profile'?profile:await this.upgrade(await this.repo.load(authorId),epoch);
             assert(author&&(authorId==='profile'||author.data.type==='author'),'请选择作者档案');
             const inspiration=await this.upgrade(await this.repo.load(inspirationId),epoch);assert(inspiration?.data.type==='inspiration','请选择灵感档案');
+            const worldTask=await this.upgrade(await this.repo.load(worldTaskId),epoch);assert(worldTask?.data.type==='worldTask','请选择世界任务档案');
             assert(guard(),'读取存档期间资料已变化');
-            const next=copy(profile.data);next.activeAuthorId=authorId;next.activeInspirationId=inspirationId;
+            const next=copy(profile.data);next.activeAuthorId=authorId;next.activeInspirationId=inspirationId;next.activeWorldTaskId=worldTaskId;
             const saved=same(next,profile.data)?profile:await this.repo.save(next,profile.revision,guard);
             assert(guard(),'保存选择期间资料已变化');
-            this.profile=saved;this.authorProfile=authorId==='profile'?null:author;this.inspiration=inspiration;this.selectedKey=chatKey;
-        }finally{if(epoch===this.epoch){this.ready=Boolean(this.profile&&this.inspiration&&this.selectedKey===chatKey);this.changed();}}
+            this.profile=saved;this.authorProfile=authorId==='profile'?null:author;this.inspiration=inspiration;this.worldTask=worldTask;this.selectedKey=chatKey;
+        }finally{if(epoch===this.epoch){this.ready=Boolean(this.profile&&this.inspiration&&this.worldTask&&this.selectedKey===chatKey);this.changed();}}
         await this.reconcile();
     }
     async createAuthor(title,{from=null}={}){
@@ -168,6 +172,7 @@ export class BBPresetsApp {
         const guard=()=>epoch===this.epoch&&context.chatKey===this.host.identity().chatKey;
         if(storyId)await this.edit(storyId,d=>invalidateSources(d,context.chatKey,context.sources),{guard});
         if(!guard())return;
+        if(this.worldTask)await this.edit(this.worldTask.data.id,d=>invalidateSources(d,context.chatKey,context.sources),{guard});
         if(this.author)await this.edit(this.author.data.id,d=>{for(const f of d.feedback)if(f.source?.chatKey===context.chatKey)f.sourceChanged=hashes.get(f.source.id)!==f.source.hash;return d;},{guard});
     }
     startGenerationPreparation(){
@@ -190,73 +195,52 @@ export class BBPresetsApp {
         // An in-flight author request must release the shared main connection first.
         if(this.host.rawPending){this.requestState='等待酒馆主连接释放';this.changed();try{await this.host.waitRaw?.();assert(!this.host.rawPending,'酒馆主连接尚未释放，请稍后重发正文');}finally{this.requestState='';}}
         assert(epoch===this.epoch&&!this.sendCancelled,'资料已切换或生成已停止，本次正文未发送');
-        return {epoch,frozenInspiration};
+        return {epoch,frozenInspiration,frozenWorldTask:copy(this.worldTask.data)};
     }
     async beforeGenerate(type='normal') {
         if(['quiet','impersonate'].includes(type))return;
+        const memoryChange=await this.followMemory();if(memoryChange?.switched)this.preparedGeneration=null;
         const prepared=this.preparedGeneration??this.startGenerationPreparation();
         let value;
         try{const result=await prepared.promise;if(result.error)throw result.error;value=result.value;}
         finally{if(this.preparedGeneration===prepared)this.preparedGeneration=null;}
         if(!value){this.host.inject('');return;}
-        const {epoch,frozenInspiration}=value;
+        const {epoch,frozenInspiration,frozenWorldTask}=value;
         assert(epoch===this.epoch&&!prepared.cancelled&&!this.sendCancelled&&prepared.chatKey===this.host.identity().chatKey,'资料已切换或生成已停止，本次正文未发送');
         const atSend=await this.host.capture();
         assert(epoch===this.epoch&&!this.sendCancelled,'读取正文材料期间聊天已变化');
         const validInspiration=invalidateSources(frozenInspiration,atSend.chatKey,atSend.sources);
-        const token=uid(),frozen=injection(copy(this.author.data),validInspiration,this.settings,atSend,token);
+        const token=uid(),frozen=injection(copy(this.author.data),validInspiration,this.settings,atSend,token,invalidateSources(frozenWorldTask,atSend.chatKey,atSend.sources));
         const baseHash=await inspirationHash(validInspiration);
         assert(epoch===this.epoch&&!this.sendCancelled,'准备注入期间聊天已变化');
         this.currentSources=atSend.sources;
-        this.generation=this.inspiration?{token,epoch,storyId:this.inspiration.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,visibleIds:frozen.visibleIds,lineIds:frozen.lineIds,inspirationIds:frozen.inspirationIds,counts:frozen.counts,features:frozen.features,controlEnabled:frozen.controlEnabled}:null;
-        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入灵感协议；本轮灵感 ${frozen.counts.inspiration??0} 条，等待回复`:'本轮按注入开关提供资料，未要求灵感维护';this.changed();
+        this.generation=this.inspiration?{token,epoch,storyId:this.inspiration.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,worldTaskId:this.worldTask.data.id,worldTaskHash:await inspirationHash(frozenWorldTask),worldTaskIds:frozen.worldTaskIds,visibleIds:frozen.visibleIds,lineIds:frozen.lineIds,inspirationIds:frozen.inspirationIds,counts:frozen.counts,features:frozen.features,controlEnabled:frozen.controlEnabled}:null;
+        this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入 v5 协议；灵感 ${frozen.counts.inspiration??0} 条 · 世界任务 ${frozen.counts.worldTask??0} 条，等待回复`:'本轮按注入开关提供资料，未要求灵感维护';this.changed();
     }
     async receiveControl(floor,generation=this.generation){
         if(!generation||generation!==this.generation||this.sendCancelled||generation.epoch!==this.epoch||generation.storyId!==this.inspiration?.data.id||!this.settings.enabled)return;
         const context=await this.host.capture(),row=context.rows.find(r=>r.floor===Number(floor));
         if(!row||row.role!=='assistant'||context.chatKey!==generation.chatKey||generation.epoch!==this.epoch||generation.storyId!==this.inspiration?.data.id)return;
-        const source=context.sources.find(s=>s.id===row.id),key='control:'+row.id+':'+row.hash;
+        const source=context.sources.find(s=>s.id===row.id);
         this.currentSources=context.sources;
-        if(this.inspiration.data.controls?.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return;
-
-        const activity={id:generation.token,chatKey:context.chatKey,source,prefixHash:sourcePrefixes(context.sources.filter(s=>s.floor<=row.floor)).get(source.id),at:Date.now(),...(generation.counts??{outline:0,writing:0,directory:0}),status:generation.controlEnabled===false?'not-requested':'missing',titleChanged:false,chapterChanged:false,revisionRequested:false};
-        const saveActivity=d=>{d.activity=[...(d.activity??[]).filter(a=>a.source.id!==source.id),activity].slice(-20);return d;};
         const guard=()=>generation===this.generation&&!this.sendCancelled&&this.settings.enabled&&generation.epoch===this.epoch&&generation.storyId===this.inspiration?.data.id&&context.chatKey===this.host.identity().chatKey;
-        if(generation.controlEnabled===false||!row.text.includes('[BBP_CONTROL]')){await this.edit(generation.storyId,saveActivity,{guard});this.controlStatus=generation.controlEnabled?'本轮未返回控制块，灵感未更新；可在工具→注入预览检查指令，或在提示词页恢复灵感控制信息默认值':'本轮未启用灵感维护，未要求控制块';this.changed();return;}
-        try{
-        const now=new Map(context.sources.map(s=>[s.id,s.hash]));
-        assert(generation.sources.every(s=>s.id===row.id||now.get(s.id)===s.hash),'正文生成期间来源变化，控制信息未应用');
-        const control=parseControl(row.text,generation.token,new Set(generation.visibleIds),{lineIds:new Set(generation.lineIds??[]),inspirationIds:new Set(generation.inspirationIds??[])});
-        assert(control.version===4,'故事控制协议已废弃，请使用灵感 version:4 协议');
-        activity.status='applied';activity.controlVersion=control.version;activity.chapterChanged=false;activity.revisionRequested=Boolean(control.revise);
-        const sources=context.sources.filter(s=>s.floor<=row.floor);
-        const local=control.version===4?storyControlChanges(this.inspiration.data,control,this.settings,{...context,rows:context.rows.filter(r=>r.floor<row.floor)}):null;
-        if(local)activity.chapterChanged=local.updatedNodeIds.length>0;
-        const receipt={id:uid(),version:control.version,token:control.token,chatKey:context.chatKey,source,sources:[source],prefixHash:sourcePrefixes(sources).get(source.id),chapter:control.chapter??null,nextIds:control.nextIds??[],...(local?{addedInspirationIds:local.addedInspirationIds,usedInspirationIds:local.usedInspirationIds,updatedNodeIds:local.updatedNodeIds}:{}),at:Date.now()};
-        const latest=await this.host.capture(),latestHashes=new Map(latest.sources.map(s=>[s.id,s.hash]));
-        assert(latest.chatKey===context.chatKey&&sources.every(s=>latestHashes.get(s.id)===s.hash),'读取资料期间来源已变化，控制信息未应用');
-        await this.edit(this.inspiration.data.id,async d=>{
-            assert(!generation.features||same(generation.features,{author:this.settings.injectAuthor!==false,story:false,inspiration:this.settings.injectInspiration!==false}),'正文期间注入开关已变化，旧控制信息未应用');
-            assert(generation.epoch===this.epoch&&await inspirationHash(d)===generation.baseHash,'正文期间灵感已变化，控制信息未应用；可重新规划');
-            d.controls??=[];if(d.controls.some(c=>c.source.id===source.id&&c.source.hash===source.hash))return d;
-            if(local?.changes.length)d=applyChanges(d,local.changes,{origin:'storycontrol',sources,key,anchor:source});
-            d.controls.push(receipt);return saveActivity(d);
-        },{guard});
-        this.controlStatus=`灵感新增 ${local.addedInspirationIds.length} 条；实际使用归档 ${local.usedInspirationIds.length} 条${local.skipped.length?'；'+local.skipped.join('；'):''}。无额外模型请求`;this.changed();
-        }catch(error){
-            if(guard()){activity.status='invalid';activity.titleChanged=false;activity.chapterChanged=false;activity.revisionRequested=false;await this.edit(generation.storyId,saveActivity,{guard}).catch(()=>{});}
-            throw error;
+        const activity={id:generation.token,chatKey:context.chatKey,source,prefixHash:sourcePrefixes(context.sources.filter(s=>s.floor<=row.floor)).get(source.id),at:Date.now(),...generation.counts,status:generation.controlEnabled===false?'not-requested':'missing',titleChanged:false,chapterChanged:false,revisionRequested:false};
+        const saveActivity=d=>{d.activity=[...(d.activity??[]).filter(a=>a.source.id!==source.id),activity].slice(-20);return d;};
+        if(generation.controlEnabled===false||!row.text.includes('[BBP_CONTROL]')){
+            await this.edit(generation.storyId,saveActivity,{guard});this.controlStatus=generation.controlEnabled?'本轮未返回控制块，创作资料未更新；可在工具→注入预览检查 v5 指令':'本轮未启用创作维护，未要求控制块';this.changed();return;
         }
+        try{return await this.worldRuntime.receiveControl(row,generation,context);}
+        catch(error){if(guard()){activity.status='invalid';await this.edit(generation.storyId,saveActivity,{guard}).catch(()=>{});}throw error;}
     }
     get recentStatus(){
         const sources=this.currentSources??[],chatKey=this.host.identity().chatKey,hashes=new Map(sources.map(s=>[s.id,s.hash])),prefixes=sourcePrefixes(sources);
         const recent=(this.inspiration?.data.activity??[]).filter(a=>a.chatKey===chatKey&&hashes.get(a.source.id)===a.source.hash&&prefixes.get(a.source.id)===a.prefixHash).slice(-5);
         const counts=this.lastInjection.counts??recent.at(-1);
-        const lines=[counts?`最近正文注入：灵感 ${counts.inspiration??0} 条 · 写作 ${counts.writing} 条`:'尚无正文调用记录'];
+        const lines=[counts?`最近正文注入：灵感 ${counts.inspiration??0} 条 · 世界任务 ${counts.worldTask??0} 条 · 写作 ${counts.writing} 条`:'尚无正文调用记录'];
         for(const a of [...recent].reverse())lines.push(`#${sources.find(s=>s.id===a.source.id)?.floor??'?'} 楼 · ${{'not-requested':'未要求灵感维护',missing:'未返回控制块',invalid:'控制未通过校验',applied:'灵感已处理'}[a.status]}`);
         lines.push(`本次打开：API 请求 ${this.stats.calls} 次 · 任务成功 ${this.stats.success} / 失败 ${this.stats.failed}`);return lines;
     }
-    taskSettings(kind,job=null){return {...copy(this.settings),connection:job?.connection??this.settings.connection};}
+    taskSettings(kind,job=null){return {...copy(this.settings),connection:job?.connection??(kind==='worldTask'?this.settings.worldTaskConnection:kind==='inspirationPlan'?this.settings.inspirationConnection:this.settings.connection)};}
     async queueJob(kind,{key=uid(),feedback=[],connection}={}) {
         assert(kind==='feedback','故事核 / 大纲及初始化维护已废弃');
         const epoch=this.epoch,owner=this.author;assert(owner,'请先选择作者');const storyId=owner.data.id;
@@ -274,9 +258,9 @@ export class BBPresetsApp {
         if(this.running)return this.running;
         const run=async()=>{
             while(this.ready&&this.visible()&&this.settings.enabled){
-                const entry=this.jobs.find(({job})=>job.state==='queued'&&job.kind==='feedback');if(!entry)return;const {job,target}=entry;
+                const entry=await this.worldRuntime.nextJob()??this.jobs.find(({job})=>job.state==='queued'&&job.kind==='feedback');if(!entry)return;const {job,target}=entry;
                 if(this.taskSettings(job.kind,job).connection==='main' && (this.host.rawPending||this.foreground&&!before))return;
-                await this.runJob(copy(job),target);
+                if(job.kind==='feedback')await this.runJob(copy(job),target);else await this.worldRuntime.runJob(copy(job),target);
             }
         };
         this.running=run().finally(()=>{this.running=null;this.changed();});return this.running;
@@ -311,7 +295,7 @@ export class BBPresetsApp {
             const visibleIds=new Set(material.current.map(r=>r.id));
             for(const c of changes){const id=c.id??c.record?.id;assert(!this.documentFor(ownerId).data.records.some(r=>r.id===id)||visibleIds.has(id),'模型试图修改本次预算未提供的条目，结果未应用');}
             await this.edit(storyId,async d=>{
-                assert(await hash(JSON.stringify(d.records))===baseHash,'资料已被修改，请重试维护以合并最新资料');
+                assert(d.jobs.some(j=>j.id===job.id),'点评任务已删除或撤回，旧结果不应用');assert(await hash(JSON.stringify(d.records))===baseHash,'资料已被修改，请重试维护以合并最新资料');
                 const options={origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor,feedbackIds:job.feedback.map(f=>f.id).filter(Boolean)};
                 const candidate=applyChanges(d,changes,options); // Validate protection even in review mode.
                 const resultCopy={baseHash,promptHash,chatKey:job.chatKey,result};this.resultCache.set(cacheKey,resultCopy);await this.writeLocal(cacheKey,resultCopy);
@@ -393,8 +377,8 @@ export class BBPresetsApp {
         const epoch=this.epoch;
         const context=this.host.identity().chatKey?await this.host.capture():{sources:[]};
         assert(epoch===this.epoch,'准备保存条目期间资料已变化，输入保留');
-        const owner=this.documentFor(target);assert(owner&&(owner.data.type==='inspiration'?r.kind==='inspiration':AUTHOR_KINDS.includes(r.kind)),'条目类别不属于当前存档；故事核 / 大纲已废弃');
-        await this.edit(target,d=>{const before=d.records.find(x=>x.id===r.id)??null;if(expected!==undefined)assert(same(before,expected),'条目已变化，输入仍保留；请重新打开最新条目后合并');if(r.kind==='inspiration'&&r.status==='active'&&before?.status!=='active')assert(d.records.filter(x=>x.kind==='inspiration'&&x.status==='active').length<(this.settings.inspirationCapacity??20),'待用灵感已达上限，请先归档或提高上限');return applyChanges(d,[{op:'put',record:r}],{actor:'user',anchor:context.sources.at(-1)??null});});
+        const owner=this.documentFor(target);assert(owner&&(owner.data.type==='inspiration'?r.kind==='inspiration':owner.data.type==='worldTask'?r.kind==='worldTask':AUTHOR_KINDS.includes(r.kind)),'条目类别不属于当前存档；故事核 / 大纲已废弃');
+        await this.edit(target,d=>{const before=d.records.find(x=>x.id===r.id)??null;if(expected!==undefined)assert(same(before,expected),'条目已变化，输入仍保留；请重新打开最新条目后合并');if(r.kind==='inspiration'&&r.status==='active'&&before?.status!=='active')assert(d.records.filter(x=>x.kind==='inspiration'&&x.status==='active').length<(this.settings.inspirationCapacity??20),'待用灵感已达上限，请先归档或提高上限');if(r.kind==='worldTask'&&r.status==='active'&&before?.status!=='active')assert(d.records.filter(x=>x.status==='active').length<(this.settings.worldTaskCapacity??5),'世界任务已达上限，请先归档或提高上限');return applyChanges(d,[{op:'put',record:r}],{actor:'user',anchor:context.sources.at(-1)??null});});
     }
     feedbackConnection(category='writing'){return category==='plot'?(this.settings.plotConnection??'main'):this.settings.connection;}
     async addFeedback({quote,note='',polarity='neutral',source=null,status='saved',category='writing',connection}) {
@@ -452,7 +436,7 @@ export class BBPresetsApp {
     async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.generation=null;this.host.controlFilter?.(settings.enabled);this.host.inject('');this.lastInjection={text:'',omitted:0};if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
     async retryJobs(id=null,target=null){
         assert(!this.running&&!this.auxiliary,'当前请求尚未结束，请稍后重试');
-        const selected=this.jobs.filter(x=>(!id||x.job.id===id)&&(!target||x.target===target)&&x.job.kind==='feedback');assert(selected.length,'没有可重试的点评任务');
+        const selected=this.jobs.filter(x=>(!id||x.job.id===id)&&(!target||x.target===target)&&['feedback','worldTask','inspirationPlan'].includes(x.job.kind));assert(selected.length,'没有可重试的任务');
         for(const scope of new Set(selected.map(x=>x.target)))await this.edit(scope,d=>{for(const j of d.jobs)if(selected.some(x=>x.target===scope&&x.job.id===j.id)){j.state='queued';delete j.error;delete j.retryable;}return d;});
         await this.drain();
         return this.jobs.some(x=>x.job.state==='failed')?'仍有失败任务，请查看任务原因和原始响应':this.jobs.length?'任务已排队，正在等待连接空闲':this.proposals.length?'结果已生成，等待应用提案':'任务已完成并应用';
@@ -460,19 +444,28 @@ export class BBPresetsApp {
     exportPromptSet(){return exportPrompts(this.settings);}
     async importPromptSet(data){await this.saveSettings({...this.settings,prompts:importPrompts(data)},copy(this.settings));return '提示词已导入并保存到服务器';}
     async diagnostic(id,target=this.author?.data.id){return await this.readLocal(`diagnostic:${target}:${id}`);}
-    cancelRequests(){this.controller?.abort();this.auxController?.abort();return '已停止当前请求；未完成点评任务保留';}
-    async bindMemory(){throw Error('旧故事联动已废弃，灵感与作者均独立选择');}
-    async followMemory(){return;}
-    async restore(id,entry){const epoch=this.epoch,revision=this.documentFor(id)?.revision;assert(revision,'请先选择要恢复的档案');const historical=await this.repo.loadVersion(id,entry);assert(epoch===this.epoch&&this.documentFor(id)?.revision===revision,'读取恢复版本期间资料已变化');await this.edit(id,d=>{const next=retireTasks(restoreDocument(d,historical.data));if(d.type==='profile'){next.activeInspirationId=d.activeInspirationId;next.activeAuthorId=d.activeAuthorId??'profile';if(d.chatBindings)next.chatBindings=copy(d.chatBindings);}return next;},{guard:()=>epoch===this.epoch&&this.documentFor(id)?.revision===revision});await this.reconcile();}
-    async exportAll(){const documents=[];for(const id of Object.keys(this.repo.index.documents))documents.push((await this.repo.load(id)).data);return {format:'bbpresets-export',schema:1,at:Date.now(),documents};}
-    async exportScope(id){const document=(await this.repo.load(id))?.data;assert(document,'资料不存在');const data=copy(document);if(data.type==='profile'){data.type='author';delete data.settings;delete data.activeAuthorId;delete data.chatBindings;delete data.activeInspirationId;data.records=data.records.filter(r=>AUTHOR_KINDS.includes(r.kind));}return {format:'bbpresets-export',schema:1,at:Date.now(),documents:[data]};}
+    cancelRequests(){this.controller?.abort();this.auxController?.abort();return '已停止当前请求；未完成任务保留，可手动重试';}
+    async bindMemoryArchives(options){return this.worldRuntime.bindMemory(options);}
+    async unbindMemoryArchives(signature){return this.worldRuntime.unbindMemory(signature);}
+    async followMemory(){return this.worldRuntime.followMemory();}
+    async bindMemory(){return this.bindMemoryArchives({inspiration:true,worldTask:true});}
+    async createWorldTaskArchive(title,options){return this.worldRuntime.createArchive(title,options);}
+    async selectWorldTask(id){return this.selectArchive('worldTask',id);}
+    async generateWorldTask(theme,options){return this.worldRuntime.generate(theme,options);}
+    async advanceWorldTask(id){return this.worldRuntime.advance(id);}
+    async loadSavedWorldTask(id){return this.worldRuntime.loadSaved(id);}
+    async deleteArchive(type,id){return this.worldRuntime.deleteArchive(type,id);}
+    async restoreDeletedArchive(id){await this.edits;await this.repo.refresh();const epoch=this.epoch,entry=this.repo.index.documents[id];assert(entry?.deleted,'此存档没有被删除');await this.repo.restoreDeleted(id,entry.revision,()=>epoch===this.epoch);this.changed();return '已恢复删除的存档；当前选择保持不变';}
+    async restore(id,entry){const epoch=this.epoch,revision=this.documentFor(id)?.revision;assert(revision,'请先选择要恢复的档案');const historical=await this.repo.loadVersion(id,entry);assert(epoch===this.epoch&&this.documentFor(id)?.revision===revision,'读取恢复版本期间资料已变化');await this.edit(id,d=>{const next=retireTasks(restoreDocument(d,historical.data));if(d.type==='profile'){next.activeInspirationId=d.activeInspirationId;next.activeAuthorId=d.activeAuthorId??'profile';next.activeWorldTaskId=d.activeWorldTaskId;if(d.memoryArchiveBindings)next.memoryArchiveBindings=copy(d.memoryArchiveBindings);if(d.chatBindings)next.chatBindings=copy(d.chatBindings);}return next;},{guard:()=>epoch===this.epoch&&this.documentFor(id)?.revision===revision});await this.reconcile();}
+    async exportAll(){const documents=[];for(const id of Object.keys(this.repo.index.documents).filter(id=>!this.repo.index.documents[id].deleted))documents.push((await this.repo.load(id)).data);return {format:'bbpresets-export',schema:1,at:Date.now(),documents};}
+    async exportScope(id){const document=(await this.repo.load(id))?.data;assert(document,'资料不存在');const data=copy(document);if(data.type==='profile'){data.type='author';delete data.settings;delete data.activeAuthorId;delete data.chatBindings;delete data.activeInspirationId;delete data.activeWorldTaskId;delete data.memoryArchiveBindings;data.records=data.records.filter(r=>AUTHOR_KINDS.includes(r.kind));}return {format:'bbpresets-export',schema:1,at:Date.now(),documents:[data]};}
     async importArchive(archive){
         assert(archive?.format==='bbpresets-export'&&archive.schema===1&&Array.isArray(archive.documents)&&archive.documents.length<200,'不是支持的导入文件');
         // Import independent copies, preserving story/author ownership. Never change the active author.
         archive.documents.forEach(validateDocument);
         const epoch=this.epoch;
         await this.edits;
-        for(const raw of archive.documents){const d=copy(raw);d.id=uid();d.title=('导入 · '+d.title).slice(0,300);d.type=['story','inspiration'].includes(raw.type)?raw.type:'author';delete d.settings;delete d.activeAuthorId;delete d.chatBindings;delete d.activeInspirationId;if(d.type==='author')d.records=d.records.filter(r=>AUTHOR_KINDS.includes(r.kind));d.bindings=[];d.memoryBinding=null;if(d.jobs.length||d.proposals.length)d.retiredTasks=[...(d.retiredTasks??[]),...d.jobs,...d.proposals].map(j=>({...j,state:'retired'}));d.jobs=[];d.proposals=[];for(const f of d.feedback)if(f.status==='queued')f.status='saved';d.parent=null;await this.repo.save(d,0,()=>this.epoch===epoch);}
+        for(const raw of archive.documents){const d=copy(raw);d.id=uid();d.title=('导入 · '+d.title).slice(0,300);d.type=['story','inspiration','worldTask'].includes(raw.type)?raw.type:'author';delete d.settings;delete d.activeAuthorId;delete d.chatBindings;delete d.activeInspirationId;delete d.activeWorldTaskId;delete d.memoryArchiveBindings;if(d.type==='author')d.records=d.records.filter(r=>AUTHOR_KINDS.includes(r.kind));d.bindings=[];d.memoryBinding=null;if(d.jobs.length||d.proposals.length)d.retiredTasks=[...(d.retiredTasks??[]),...d.jobs,...d.proposals].map(j=>({...j,state:'retired'}));d.jobs=[];d.proposals=[];for(const c of d.controls??[])for(const k of ['deferred','worldTaskId','worldTaskHash','recognition'])delete c[k];for(const f of d.feedback)if(f.status==='queued')f.status='saved';d.parent=null;await this.repo.save(d,0,()=>this.epoch===epoch);}
         await this.migrateInspirations(epoch);this.changed();
     }
     destroy(){clearInterval(this.queueTimer);this.suspend();this.host.destroy();}
