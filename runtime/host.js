@@ -2,7 +2,8 @@ import {assert,copy,hash,uid,validId} from '../core/model.js';
 import {networkError,retryRequest} from './network.js';
 import {promptText} from '../core/prompt-templates.js';
 import {CONTROL_FILTER,stripControl} from '../core/outline.js';
-import {memoryArchiveRevision,worldTaskMaterial} from '../core/memory-archive.js';
+import {memoryArchiveRevision,worldTaskMaterial,memoryInjectionModes} from '../core/memory-archive.js';
+import {retrieveMemory,hydrateMemoryVectors,memoryVectorBankKey} from '../core/memory-retrieval.js';
 
 export class TavernHost {
     constructor(context = ()=>globalThis.SillyTavern?.getContext()) { this.context=context;this.foreground=false;this.rawPending=false;this.disposers=[];this.key=''; }
@@ -223,17 +224,50 @@ export class TavernHost {
         if(!slot)return unavailable('当前 BB-Memory 存档尚无可读取的已保存数据，请先在 BB-Memory 保存当前存档后重试');
         const stamp=slot._slotCreatedAt??slot.createdAt;
         if((typeof stamp!=='number'&&typeof stamp!=='string')||!String(stamp).trim()||!Number.isFinite(Number(stamp))||Number(stamp)<=0)return unavailable('当前 BB-Memory 存档缺少可验证的创建标识，请先保存或升级 BB-Memory 后重试');
-        const snapshot={available:true,present:true,character,slotName,stamp:String(stamp),signature:JSON.stringify([character,slotName,String(stamp)]),identitySignature:JSON.stringify([character,String(stamp)]),bindingAt:typeof binding==='object'?binding.updatedAt:0,updatedAt:slot._slotUpdatedAt??slot.updatedAt??null,source,data:slot};
+        const snapshot={available:true,present:true,character,slotName,stamp:String(stamp),signature:JSON.stringify([character,slotName,String(stamp)]),identitySignature:JSON.stringify([character,String(stamp)]),bindingAt:typeof binding==='object'?binding.updatedAt:0,updatedAt:slot._slotUpdatedAt??slot.updatedAt??null,source,data:slot,...(raw?.schema==='bb-memory-vector-ref-v1'&&raw.vectorPack?{vectorPack:raw.vectorPack}:{})};
         snapshot.revisionSignature=await hash(JSON.stringify(memoryArchiveRevision(snapshot)));
         return snapshot;
     }
-    async worldTaskSeed(budget=20000) {
-        const identity=this.identity(),snapshot=await this.memorySnapshot();
+    async worldTaskSeed(budget=20000,options={mode:'full'}) {
+        const identity=this.identity(),selectionToken=this.memorySelectionToken(),snapshot=await this.memorySnapshot();
         assert(!snapshot||snapshot.available,snapshot?.reason);
-        const world=JSON.parse(await this.seed(budget)),material=worldTaskMaterial(snapshot,world,budget),latest=await this.memorySnapshot();
-        assert(identity.chatKey===this.identity().chatKey&&(snapshot?.identitySignature??null)===(latest?.identitySignature??null)&&(snapshot?.revisionSignature??null)===(latest?.revisionSignature??null),'读取世界任务资料期间聊天或 BB-Memory 存档已变化，请重试');
+        const modes=memoryInjectionModes(options),needsHits=snapshot&&Object.entries(modes).some(([key,mode])=>mode==='vector'&&snapshot.data[key]?.length);
+        const retrieval=needsHits?await this.worldTaskRetrieval(snapshot,options):null;
+        const world=JSON.parse(await this.seed(budget)),material=worldTaskMaterial(snapshot,world,budget,{...options,retrieval,notes:retrieval?.notes??[]}),latest=await this.memorySnapshot();
+        assert(!options.signal?.aborted&&selectionToken===this.memorySelectionToken()&&identity.chatKey===this.identity().chatKey&&(snapshot?.identitySignature??null)===(latest?.identitySignature??null)&&(snapshot?.revisionSignature??null)===(latest?.revisionSignature??null),'读取世界任务资料期间聊天或 BB-Memory 存档已变化，请重试');
         this.worldTaskSeedInfo={sections:material.world.materials.map(section=>section.label),notes:material.notes,omitted:material.world.omitted,counts:Object.fromEntries(['timeline','milestones','npc','items','memories'].map(key=>[key,material.memory?.[key]?.length??0]))};
         return {...material,memorySnapshot:snapshot?{available:snapshot.available,identitySignature:snapshot.identitySignature,revisionSignature:snapshot.revisionSignature,signature:snapshot.signature,character:snapshot.character,slotName:snapshot.slotName,stamp:snapshot.stamp,updatedAt:snapshot.updatedAt,source:snapshot.source}:null,counts:this.worldTaskSeedInfo.counts};
+    }
+
+    async worldTaskRetrieval(snapshot,{query='',signal}={}){
+        const c=this.ctx(),identity=this.identity(),memorySettings=c.extensionSettings.bb_memory,settings=copy(memorySettings),notes=[],characterId=c.characterId,groupId=c.groupId;
+        // Use only copied settings/data. BB-Memory's getSettings()/interceptor also perform writes.
+        let text=String(query||c.chat?.findLast(message=>message.is_user)?.mes||'').trim();
+        if(text.length>6000){text=text.slice(0,3000)+'\n'+text.slice(-3000);notes.push('本次检索查询按 6000 字符节选，保留任务要求与近期上下文');}
+        let data=copy(snapshot.data),queryEmbedding=null;
+        if(settings.embeddingEnabled&&settings.embeddingEndpoint&&text){
+            try{
+                let endpoint=new URL(String(settings.embeddingEndpoint).trim().replace(/\/+$/,''));
+                assert(['http:','https:'].includes(endpoint.protocol)&&!endpoint.username&&!endpoint.password&&!endpoint.search&&!endpoint.hash,'Embedding 地址格式无效');
+                if(!endpoint.pathname.endsWith('/embeddings'))endpoint.pathname+=endpoint.pathname.endsWith('/v1')?'/embeddings':'/v1/embeddings';
+                const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json',...(settings.embeddingApiKey?{Authorization:`Bearer ${settings.embeddingApiKey}`}:{})},body:JSON.stringify({model:settings.embeddingModel,input:text}),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(3000)]):AbortSignal.timeout(3000)});
+                assert(response.ok,'Embedding 服务请求失败');const result=await response.json(),vector=result?.data?.[0]?.embedding;
+                assert(Array.isArray(vector)&&vector.length>0&&vector.length<=32768&&vector.every(Number.isFinite),'Embedding 返回的向量无效');queryEmbedding=vector;
+                let bank=snapshot.vectorPack;
+                if(!bank){
+                    const lf=c.libs?.localforage??globalThis.SillyTavern?.libs?.localforage,scope=await this.memoryStorageScope(),vectorScope=groupId!=null&&groupId!==''?`group:${groupId}`:`char:${characterId}`;
+                    bank=lf?await lf.getItem(scope+memoryVectorBankKey(vectorScope)):null;
+                }
+                data=hydrateMemoryVectors(data,bank,settings.embeddingModel);
+            }catch(error){
+                if(signal?.aborted)throw Error('记忆检索已取消');
+                queryEmbedding=null;notes.push('Embedding 不可用，本次按关键词和常驻规则检索；没有改为记忆全文');
+            }
+        }else notes.push('未启用或未配置 Embedding，本次按关键词和常驻规则检索');
+        assert(!signal?.aborted&&identity.chatKey===this.identity().chatKey&&this.ctx().characterId===characterId&&this.ctx().groupId===groupId&&this.ctx().extensionSettings===c.extensionSettings&&this.ctx().extensionSettings.bb_memory===memorySettings,'检索期间聊天或账号已变化，请重试');
+        // Never forward API settings or vectors to the planning model.
+        for(const key of ['embeddingApiKey','embeddingEndpoint','autoGenApiKey','autoGenEndpoint','apiProfiles'])delete settings[key];
+        const retrieval=retrieveMemory(data,text,settings,queryEmbedding);retrieval.notes=[...notes,...(retrieval.notes??[])];return retrieval;
     }
 
     memoryRetrieval(snapshot){

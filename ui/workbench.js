@@ -55,7 +55,7 @@ export class Workbench {
         document.addEventListener('pointerup',this.onSelection);
         this.entry=el('div','','bbp-entry inline-drawer');this.entry.id='bbpresets-entry';
         const summary=el('div','','inline-drawer-toggle inline-drawer-header bbp-entry-toggle');summary.setAttribute('role','button');summary.tabIndex=0;this.summary=summary;
-        summary.append(el('b','BBPresets v0.5.9'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
+        summary.append(el('b','BBPresets v0.6.0'),el('div','','inline-drawer-icon fa-solid fa-circle-chevron-down down'));
         this.entryContent=el('div','','inline-drawer-content bbp-entry-content');this.entryContent.id='bbpresets-entry-content';this.entryContent.hidden=true;
         summary.setAttribute('aria-expanded','false');summary.setAttribute('aria-controls',this.entryContent.id);
         // Own this click so ST's delegated slideToggle cannot toggle a second time.
@@ -251,7 +251,7 @@ export class Workbench {
         options.append(field('每档使用中的世界任务上限',capacity),field('允许 AI 提议新世界任务',ai),field('剧情发展识别深度',recognition),field('任务显示方式',display),this.button('保存世界任务设置',async()=>{await a.saveSettings({...a.settings,worldTaskCapacity:Number(capacity.value),worldTaskAiEnabled:ai.checked,worldTaskRecognition:recognition.value,worldTaskView:display.value},copy(a.settings));this.render();return '世界任务设置已保存；降低上限不会删除已有任务';}),el('p','新任务想法和灵感触发始终参考隔一条的稳定回复。已有任务可选择立即识别；达成、偏离或需要调整时调用安排 API。防剧透与微剧透模式不展开任务主体。','bbp-hint'));this.content.append(options);
         if(!this.worldTaskDrafts.has(doc.id))this.worldTaskDrafts.set(doc.id,{theme:'',connection:a.settings.worldTaskConnection??'main'});
         const draft=this.worldTaskDrafts.get(doc.id),theme=area(draft.theme),connection=select([['main','主 API'],['custom','副 API']],draft.connection);theme.rows=4;theme.maxLength=2000;theme.placeholder='想看到的主题、NPC、事件或情节。可留给 AI 发展空间。';theme.addEventListener('input',()=>{draft.theme=theme.value;});connection.addEventListener('change',()=>{draft.connection=connection.value;});
-        const generate=this.section('创建世界任务','AI 根据世界书、已确认记忆和当前上下文，设计任务名、主体与下一阶段提醒。');generate.append(field('主题 / 情节期待',theme),field('本次生成 API',connection),this.button('生成世界任务',async()=>{assert(a.worldTask?.data.id===doc.id,'世界任务档已切换，请回原档继续');const value=theme.value.trim();assert(value,'请先填写主题或情节期待');const result=await a.generateWorldTask(value,{connection:connection.value});if(!String(result??'').includes('失败')&&theme.value.trim()===value){draft.theme='';theme.value='';}return result??'世界任务已提交，请查看任务队列和列表';}));this.content.append(generate);
+        const generate=this.section('创建世界任务','AI 根据世界书、已保存记忆和当前上下文，设计任务名、主体与下一阶段提醒。');generate.append(el('p','记忆注入：'+({vector:'向量 / 关键词命中',full:'全量',mixed:'按类别混合'}[a.settings.worldTaskMemoryMode??'vector']),'bbp-hint'),this.button('设置世界任务上下文',()=>this.open('settings')),field('主题 / 情节期待',theme),field('本次生成 API',connection),this.button('生成世界任务',async()=>{assert(a.worldTask?.data.id===doc.id,'世界任务档已切换，请回原档继续');const value=theme.value.trim();assert(value,'请先填写主题或情节期待');const result=await a.generateWorldTask(value,{connection:connection.value});if(!String(result??'').includes('失败')&&theme.value.trim()===value){draft.theme='';theme.value='';}return result??'世界任务已提交，请查看任务队列和列表';}));this.content.append(generate);
         const count=el('p','','bbp-hint'),status=select([['active','使用中的任务'],['archived','已归档任务'],['','全部任务']],'active'),list=el('div','','bbp-world-tasks');this.content.append(field('任务状态',status),count,list);
         const draw=()=>{
             const current=a.documentFor(doc.id)?.data??doc,all=current.records.filter(r=>r.kind==='worldTask'),active=all.filter(r=>r.status==='active'),displayMode=a.settings.worldTaskView??'safe';count.textContent=`使用中 ${active.length} / ${a.settings.worldTaskCapacity??5} 个 · 已归档 ${all.length-active.length} 个`;list.replaceChildren();
@@ -402,13 +402,20 @@ export class Workbench {
         const custom=el('div');fields.endpoint=input(s.endpoint);fields.model=input(s.model);const key=input('','password');key.autocomplete='off';key.placeholder=a.host.key?'已保存在本设备；留空保留':'仅保存在本设备，不随导出同步';custom.append(field('独立 API 地址（支持 /v1 或完整 /chat/completions）',fields.endpoint),field('独立模型名称',fields.model),field('独立 API Key',key),this.button('清除本设备 API Key',async()=>{await a.host.setKey('');key.value='';}));
         fields.inspirationConnection=select([['main','主 API'],['custom','副 API']],s.inspirationConnection??'main');connection.append(field('灵感详细安排 API',fields.inspirationConnection));fields.worldTaskConnection=select([['main','主 API'],['custom','副 API']],s.worldTaskConnection??'main');connection.append(field('世界任务生成 / 推进 API',fields.worldTaskConnection));
         const showCustom=()=>{custom.hidden=![fields.connection,fields.plotConnection,fields.inspirationConnection,fields.worldTaskConnection].some(n=>n.value==='custom');};for(const n of [fields.connection,fields.plotConnection,fields.inspirationConnection,fields.worldTaskConnection])n.addEventListener('change',showCustom);showCustom();connection.append(custom);
-        const values=()=>({...s,...Object.fromEntries(Object.entries(fields).map(([k,n])=>[k,n.type==='checkbox'?n.checked:n.type==='number'?Number(n.value):n.value]))});
+        const memoryFields={};
+        const values=()=>({...s,...Object.fromEntries(Object.entries(fields).map(([k,n])=>[k,n.type==='checkbox'?n.checked:n.type==='number'?Number(n.value):n.value])),worldTaskMemoryModes:Object.fromEntries(Object.entries(memoryFields).map(([k,n])=>[k,n.value]))});
         connection.append(this.button('测试点评连接',()=>a.testConnection(values(),key.value||a.host.key)),el('p','测试使用当前表单，不提交故事；测试成功后请保存设置。独立 API 需允许浏览器跨域，Key 仅在本设备保存。','bbp-hint'));this.content.append(connection);
         const rules=this.section('生成与审阅');fields.mode=select([['semi','半自动：重要变更先审阅'],['auto','全自动：自动修改全部未保护资料'],['manual','全手动：只按按钮运行，变更先审阅']],s.mode);rules.append(field('编辑权限',fields.mode));
         for(const [k,label] of [['enabled','启用 BBPresets']]){fields[k]=check(s[k]);rules.append(field(label,fields[k]));}
         const number=(container,k,label,min,max)=>{const n=fields[k]=input(s[k],'number');n.min=min;n.max=max;container.append(field(label,n));};
         number(rules,'feedbackThreshold','积累多少条待发送点评后总结',1,100);this.content.append(rules);
         const world=this.section('世界任务','触发提示词与下一阶段提醒保持简短；详细安排复用世界书和已确认记忆资料。');number(world,'worldTaskCapacity','每档使用中的世界任务数量上限',1,50);fields.worldTaskAiEnabled=check(s.worldTaskAiEnabled===true);fields.worldTaskRecognition=select([['delayed','隔一条 AI 回复识别（避开最新重 roll）'],['immediate','生成完成后立即识别']],s.worldTaskRecognition??'delayed');fields.worldTaskView=select([['safe','防剧透：任务名与条目数'],['brief','微剧透：再显示一句话简介'],['spoiler','剧透：显示下一阶段和任务主体']],s.worldTaskView??'safe');world.append(field('允许 AI 提议新世界任务',fields.worldTaskAiEnabled),field('剧情发展识别深度',fields.worldTaskRecognition),field('世界任务显示方式',fields.worldTaskView),el('p','AI 新世界任务想法和灵感触发始终读取隔一条的稳定回复；识别深度只控制已有世界任务的阶段回报。','bbp-hint'));this.content.append(world);
+        const memory=this.section('世界任务上下文','创建与推进共用此设置。默认按本次任务与近期上下文检索，参考 BB-Memory 正文的向量、关键词及常驻规则；也可读取全文或按类别混合。');
+        fields.worldTaskMemoryMode=select([['vector','向量命中（默认）'],['full','全量注入'],['mixed','按类别混合']],s.worldTaskMemoryMode??'vector');
+        const mixed=el('div');
+        for(const [key,label] of [['timeline','时间线'],['milestones','里程碑'],['npc','人物'],['items','物品'],['memories','记忆']]){memoryFields[key]=select([['vector','向量命中'],['full','全量注入']],s.worldTaskMemoryModes?.[key]??'vector');mixed.append(field(label+'注入方式',memoryFields[key]));}
+        const showMixed=()=>{mixed.hidden=fields.worldTaskMemoryMode.value!=='mixed';};fields.worldTaskMemoryMode.addEventListener('change',showMixed);showMixed();
+        memory.append(field('世界任务记忆注入方式',fields.worldTaskMemoryMode),mixed,el('p','只读当前已保存槽。已配置 Embedding 时会额外发一次检索请求；关闭或服务失败时说明关键词降级，不自动改成全文。时间线与常驻资料遵循各自规则，检索结果和正文预算可能不同。没有 BB-Memory 时仍可独立生成；所选记忆超过预算会提示调整。','bbp-hint'));this.content.append(memory);
         const budget=el('details','','bbp-card');budget.append(el('summary','上下文预算与等待时长'));
         for(const [k,label,min,max] of [['maxInputChars','任务 / 灵感 / 点评材料字符预算（不含固定指令）',2000,150000],['injectionChars','正文注入字符预算',500,40000],['timeoutSeconds','主 API 慢响应提醒 / 副 API 超时（秒）',10,300]])number(budget,k,label,min,max);
         budget.append(el('p','主 API 超过此时长继续等待原请求；副 API 超时会取消当次请求。短暂网络故障最多重试两次。','bbp-hint'));this.content.append(budget);
@@ -417,9 +424,9 @@ export class Workbench {
     }
     prompts(){
         const a=this.app;this.content.append(el('h2','全部提示词'),el('p','逐条展开后可编辑并保存。{{material}} 等占位符会填入本次资料；编辑不会解除保护或格式校验。提示词随账户保存，导出仅含提示词。'));
-        this.content.append(el('p','v0.5.9 使用简短的灵感 / 世界任务触发和 version:5 正文协议，详细安排独立请求。旧大纲和正文模板保留在导出文件中，不再调用。','bbp-hint'));
+        this.content.append(el('p','v0.6.0 使用简短的灵感 / 世界任务触发和 version:5 正文协议，创作说明由独立标签包裹，详细安排独立请求。旧大纲和正文模板保留在导出文件中，不再调用。','bbp-hint'));
         const file=input('','file');file.accept='.json,application/json';
-        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.5.9.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
+        this.content.append(this.button('导出整套提示词',()=>download(a.exportPromptSet(),'BBPresets-prompts-v0.6.0.json')),field('导入提示词文件',file),this.button('导入并保存提示词',async()=>{assert(file.files[0]&&file.files[0].size<1000000,'请选择小于 1 MB 的提示词 JSON 文件');const result=await a.importPromptSet(JSON.parse(await file.files[0].text()));this.promptDrafts={};this.render();return result;}));
         const promptGroups=[['通用规则',['system','authorContract','worldTaskContract']],['划线评',['feedback','plotAuthorFeedback']],['正文触发与注入',['creativeInjectionV5','creativeControlV5']],['灵感安排',['inspirationPlan']],['世界任务安排',['worldTaskCreate','worldTaskAdvance']],['连接',['connectionTest']]];
         for(const [title,keys] of promptGroups){const group=el('section','','bbp-prompt-group');group.append(el('h3',title));this.content.append(group);
         for(const key of keys){const entry=PROMPTS[key];if(!entry)continue;

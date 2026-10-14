@@ -23,6 +23,7 @@ export class WorldTaskRuntime {
     async unbindMemory(signature){await this.app.edit('profile',d=>{d.memoryArchiveBindings=(d.memoryArchiveBindings??[]).filter(b=>b.signature!==signature);return d;});return '已解除绑定，当前存档选择保留';}
     async followMemory(){
         const a=this.app;if(this.memoryChecking||!a.ready||!a.host.memorySnapshot)return;
+        if(!a.host.identity().chatKey)return;
         const selectionToken=a.host.memorySelectionToken?.();if(selectionToken!==undefined&&selectionToken===this.lastSelectionToken)return;
         this.memoryChecking=true;
         try{
@@ -94,13 +95,14 @@ export class WorldTaskRuntime {
         await this.queue(a.worldTask.data.id,{mode:'advance',signals:[{id,status:'adjust',reason:'用户要求重新规划下一阶段'}],sources:context.sources,source:context.sources.at(-1)??null,prefixHash:sourcePrefixes(context.sources).get(context.sources.at(-1)?.id)??null,immediate:true});await a.drain();return '世界任务推进已处理；请查看任务状态';
     }
     async nextJob(){
-        const a=this.app,queued=a.jobs.filter(({job})=>job.state==='queued'&&['worldTask','inspirationPlan'].includes(job.kind)&&(job.kind==='worldTask'?job.immediate||a.settings.injectWorldTask!==false&&(job.signal?.mode==='advance'||a.settings.worldTaskAiEnabled):a.settings.injectInspiration!==false&&a.settings.inspirationAiEnabled!==false));if(!queued.length)return null;
+        const a=this.app;if(!a.host.identity().chatKey)return null;
+        const queued=a.jobs.filter(({job})=>job.state==='queued'&&['worldTask','inspirationPlan'].includes(job.kind)&&(job.kind==='worldTask'?job.immediate||a.settings.injectWorldTask!==false&&(job.signal?.mode==='advance'||a.settings.worldTaskAiEnabled):a.settings.injectInspiration!==false&&a.settings.inspirationAiEnabled!==false));if(!queued.length)return null;
         const context=await a.host.capture(),latest=context.rows.findLast(r=>r.role==='assistant');
         return queued.find(({job})=>job.chatKey===context.chatKey&&(job.immediate||job.source&&latest&&latest.floor>job.source.floor))??null;
     }
     async receiveControl(row,g,context){
         const a=this.app,source=context.sources.find(s=>s.id===row.id),sources=context.sources.filter(s=>s.floor<=row.floor),prefixHash=sourcePrefixes(sources).get(source.id);
-        const guard=()=>g===a.generation&&!a.sendCancelled&&g.epoch===a.epoch&&a.settings.enabled&&g.storyId===a.inspiration?.data.id&&g.worldTaskId===a.worldTask?.data.id;
+        const guard=()=>g.controlCancellation===a.controlCancellation&&!a.sendCancelled&&g.epoch===a.epoch&&a.settings.enabled&&g.storyId===a.inspiration?.data.id&&g.worldTaskId===a.worldTask?.data.id;
         assert(guard(),'本轮存档已变化');const latestHashes=new Map(context.sources.map(s=>[s.id,s.hash]));assert(g.sources.every(s=>s.id===row.id||latestHashes.get(s.id)===s.hash),'正文生成期间来源变化，控制未应用');
         const control=parseWorldTaskControl(row.text,g.token,{inspirationIds:new Set(g.inspirationIds),worldTaskIds:new Set(g.worldTaskIds)});
         const features={author:a.settings.injectAuthor!==false,story:false,inspiration:a.settings.injectInspiration!==false,worldTask:a.settings.injectWorldTask!==false};assert(same(g.features,features),'正文期间注入开关已变化');
@@ -109,18 +111,30 @@ export class WorldTaskRuntime {
         const received=a.inspiration.data.controls?.some(c=>c.source.id===source.id&&c.source.hash===source.hash);
         if(!received&&control.worldTask.signals.length)assert(await stateHash(a.worldTask.data)===g.worldTaskHash,'正文期间世界任务已变化，推进信号未应用');
         if(!received){
-            const local=storyControlChanges(a.inspiration.data,{nodes:[],revise:null,inspiration:{add:[],update:control.inspiration.update,usedIds:control.inspiration.usedIds}},a.settings,context);
             const activity={id:g.token,chatKey:context.chatKey,source,prefixHash,at:Date.now(),...g.counts,status:'applied',controlVersion:5,titleChanged:false,chapterChanged:false,revisionRequested:control.worldTask.signals.length>0};
-            const deferred={inspirationIdea:control.inspiration.idea&&a.settings.inspirationAiEnabled!==false&&inspirationRoom(a.inspiration.data,a.settings,context).canAdd?control.inspiration.idea:null,worldTaskIdea:control.worldTask.idea&&a.settings.worldTaskAiEnabled===true&&a.worldTask.data.records.filter(r=>r.status==='active').length<(a.settings.worldTaskCapacity??5)?control.worldTask.idea:null,worldTaskSignals:control.worldTask.signals};
-            const receipt={id:uid(),version:5,token:g.token,chatKey:context.chatKey,source,sources,prefixHash,chapter:null,nextIds:[],addedInspirationIds:[],usedInspirationIds:local.usedInspirationIds,updatedNodeIds:[],deferred,worldTaskId:g.worldTaskId,worldTaskHash:g.worldTaskHash,recognition:a.settings.worldTaskRecognition,at:Date.now()};
-            await a.edit(g.storyId,async d=>{const fresh=await a.host.capture();assert(sourcePrefixes(fresh.sources).get(source.id)===prefixHash,'接收控制期间来源变化');assert(guard()&&await stateHash(d)===g.baseHash,'正文期间灵感已变化，控制未应用');if(local.changes.length)d=applyChanges(d,local.changes,{origin:'storycontrol',sources:sources.map(s=>s.id===source.id?{...s,prefixHash}:s),key:'control:'+source.id+':'+source.hash,anchor:source});d.controls??=[];d.controls.push(receipt);d.activity=[...(d.activity??[]).filter(x=>x.source.id!==source.id),activity].slice(-20);return d;},{guard});
+            await a.edit(g.storyId,async d=>{
+                const fresh=await a.host.capture();assert(sourcePrefixes(fresh.sources).get(source.id)===prefixHash,'接收控制期间来源变化');assert(guard(),'本轮存档已变化');
+                let usedIds=control.inspiration.usedIds;
+                if(await stateHash(d)!==g.baseHash){
+                    // Earlier background receipts may finish after this reply started.
+                    // Rebase only unchanged targets; independent short ideas stay valid.
+                    const baseline=new Map((g.inspirationRecords??[]).map(r=>[r.id,r]));
+                    const unchanged=id=>baseline.has(id)&&!d.excluded.includes(id)&&same(d.records.find(r=>r.id===id),baseline.get(id));
+                    if(a.settings.inspirationAiEnabled!==false)for(const item of control.inspiration.update)assert(unchanged(item.id),'正文期间目标灵感已变化，更新未应用');
+                    usedIds=usedIds.filter(id=>{const current=d.records.find(r=>r.id===id);if(baseline.has(id)&&current?.kind==='inspiration'&&current.status==='archived')return false;assert(unchanged(id),'正文期间目标灵感已变化，使用回报未应用');return true;});
+                }
+                const local=storyControlChanges(d,{nodes:[],revise:null,inspiration:{add:[],update:control.inspiration.update,usedIds}},a.settings,fresh);
+                const deferred={inspirationIdea:control.inspiration.idea&&a.settings.inspirationAiEnabled!==false&&inspirationRoom(d,a.settings,fresh).canAdd?control.inspiration.idea:null,worldTaskIdea:control.worldTask.idea&&a.settings.worldTaskAiEnabled===true&&a.worldTask.data.records.filter(r=>r.status==='active').length<(a.settings.worldTaskCapacity??5)?control.worldTask.idea:null,worldTaskSignals:control.worldTask.signals};
+                const receipt={id:uid(),version:5,token:g.token,chatKey:context.chatKey,source,sources,prefixHash,chapter:null,nextIds:[],addedInspirationIds:[],usedInspirationIds:local.usedInspirationIds,updatedNodeIds:[],deferred,worldTaskId:g.worldTaskId,worldTaskHash:g.worldTaskHash,recognition:a.settings.worldTaskRecognition,at:Date.now()};
+                if(local.changes.length)d=applyChanges(d,local.changes,{origin:'storycontrol',sources:sources.map(s=>s.id===source.id?{...s,prefixHash}:s),key:'control:'+source.id+':'+source.hash,anchor:source});d.controls??=[];d.controls.push(receipt);d.activity=[...(d.activity??[]).filter(x=>x.source.id!==source.id),activity].slice(-20);return d;
+            },{guard});
         }
         // The receipt is a durable outbox. A queue-save failure can be repaired after reload.
         await this.flushOutbox(context);
         a.controlStatus=`灵感使用归档 ${control.inspiration.usedIds.length} 条；创作触发已保存，隔层想法将在下一条 AI 回复完成后处理`;a.changed();
     }
     async flushOutbox(context=null){
-        const a=this.app;if(!a.ready||!a.settings.enabled)return;context??=await a.host.capture();
+        const a=this.app;if(!a.ready||!a.settings.enabled||!a.host.identity().chatKey)return;context??=await a.host.capture();
         const epoch=a.epoch,prefixes=sourcePrefixes(context.sources);
         for(const c of a.inspiration.data.controls??[]){
             if(c.version!==5||!c.deferred||c.chatKey!==context.chatKey||prefixes.get(c.source.id)!==c.prefixHash)continue;
@@ -132,8 +146,8 @@ export class WorldTaskRuntime {
             if(c.deferred.worldTaskSignals.length){const key='world-progress:'+c.source.id+':'+c.source.hash;if(a.worldTask.data.processed.includes(key)||a.worldTask.data.jobs.some(j=>j.key===key))continue;if(await stateHash(a.worldTask.data)!==c.worldTaskHash)continue;await this.queue(c.worldTaskId,{...data,mode:'advance',signals:c.deferred.worldTaskSignals,expectedHash:c.worldTaskHash,immediate:c.recognition==='immediate',key});}
         }
     }
-    async seed(budget){
-        const a=this.app;if(a.host.worldTaskSeed)return a.host.worldTaskSeed(budget);
+    async seed(budget,options={mode:'full'}){
+        const a=this.app;if(a.host.worldTaskSeed)return a.host.worldTaskSeed(budget,options);
         const world=await a.host.seed?.(budget)??'';return {world:typeof world==='string'?world:JSON.stringify(world),memory:null,memorySnapshot:null};
     }
     async runJob(job,ownerId){
@@ -150,7 +164,8 @@ export class WorldTaskRuntime {
             const cutoff=job.immediate?Infinity:job.source.floor;
             const rows=context.rows.filter(r=>r.floor<=cutoff).slice(-(settings.contextRounds??6)*2).map(r=>({role:r.role,text:r.text.replace(/\[BBP_CONTROL\][\s\S]*?\[\/BBP_CONTROL\]/g,'')}));
             const base={input,current,context:rows,author:active(a.author.data).map(clean)};const available=budget-JSON.stringify(base).length-1000;assert(available>=2000,'任务主体与上下文超过材料预算，请提高预算或减少上下文轮数');
-            const seed=await this.seed(available);selectionToken=a.host.memorySelectionToken?.();const material={...base,world:seed.world,memory:seed.memory,notes:seed.notes??[]};assert(JSON.stringify(material).length<=budget,'世界任务完整材料超过预算，未发送；请提高预算');assert(guard(),'准备材料期间存档已切换');
+            const memoryOptions={...(job.kind==='worldTask'?{mode:settings.worldTaskMemoryMode??'vector',categories:settings.worldTaskMemoryModes,query:[input.idea,...input.signals.map(s=>s.reason??''),...current.map(r=>[r.title,r.summary,r.nextNode].filter(Boolean).join('\n')),...rows.map(r=>r.text)].filter(Boolean).join('\n\n')}:{mode:'full'}),signal:controller.signal};
+            const seed=await this.seed(available,memoryOptions);selectionToken=a.host.memorySelectionToken?.();const material={...base,world:seed.world,memory:seed.memory,notes:seed.notes??[]};assert(JSON.stringify(material).length<=budget,'世界任务完整材料超过预算，未发送；请提高预算');assert(guard(),'准备材料期间存档已切换');
             await a.edit(ownerId,d=>{const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已失效');j.attempts++;return d;},{guard});
             const key=job.kind==='inspirationPlan'?'inspirationPlan':input.mode==='advance'?'worldTaskAdvance':'worldTaskCreate';
             const prompt=promptText(settings,key,{contract:promptText(settings,job.kind==='inspirationPlan'?'inspirationPlanContract':'worldTaskContract'),material:JSON.stringify(material)});

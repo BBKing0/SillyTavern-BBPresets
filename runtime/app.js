@@ -13,7 +13,7 @@ const inspirationHash=doc=>hash(JSON.stringify({records:doc.records,excluded:doc
 export class BBPresetsApp {
     constructor(host,{notify=()=>{},visible=()=>!globalThis.document?.hidden}={}) {
         this.host=host;this.notify=notify;this.visible=visible;this.epoch=0;this.story=null;this.inspiration=null;this.profile=null;this.listeners=new Set();this.edits=Promise.resolve();this.running=null;this.controller=null;this.error='';this.status='loading';this.lastInjection={text:'',omitted:0};this.stats={calls:0,success:0,failed:0,usage:null};this.ready=false;
-        this.worldTask=null;this.worldRuntime=new WorldTaskRuntime(this);this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';this.generation=null;this.controlTask=Promise.resolve();this.controlStatus='';this.waitingOutline=false;
+        this.worldTask=null;this.worldRuntime=new WorldTaskRuntime(this);this.drafts=new Map();this.localWrites=Promise.resolve();this.resultCache=new Map();this.requestState='';this.generation=null;this.controlTask=Promise.resolve();this.controlCancellation=0;this.controlStatus='';this.waitingOutline=false;
     }
     changed(){for(const fn of this.listeners)fn();}
     report(error){this.error=error.message??String(error);this.notify(this.error,'error');this.changed();}
@@ -35,7 +35,7 @@ export class BBPresetsApp {
         // GENERATION_ENDED receives chat.length, not the generation type.
         const ended=()=>{this.host.foreground=false;this.preparedGeneration=null;setTimeout(()=>this.resumeQueue(),0);};
         this.host.on('GENERATION_ENDED',ended);
-        this.host.on('GENERATION_STOPPED',()=>{this.sendCancelled=true;this.generation=null;if(this.preparedGeneration)this.preparedGeneration.cancelled=true;this.controller?.abort();this.auxController?.abort();this.waitResolve?.('cancel');this.host.foreground=false;});
+        this.host.on('GENERATION_STOPPED',()=>{this.sendCancelled=true;this.controlCancellation++;this.generation=null;if(this.preparedGeneration)this.preparedGeneration.cancelled=true;this.controller?.abort();this.auxController?.abort();this.waitResolve?.('cancel');this.host.foreground=false;});
         this.host.on('MESSAGE_RECEIVED',(floor,type)=>{if(type==='quiet'||type==='first_message')return;const generation=this.generation;this.controlTask=this.controlTask.then(()=>this.receiveControl(floor,generation)).catch(e=>{this.controlStatus=e.message;this.changed();});});
         for(const event of ['MESSAGE_SWIPED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_DELETED'])this.host.on(event,()=>{this.reconcile().catch(e=>this.report(e));});
         for(const event of ['MAIN_API_CHANGED','OAI_PRESET_CHANGED_AFTER','CHATCOMPLETION_MODEL_CHANGED','CONNECTION_PROFILE_LOADED'])this.host.on(event,()=>{this.controller?.abort();this.auxController?.abort();});
@@ -47,6 +47,9 @@ export class BBPresetsApp {
     get foreground(){return this.host.isForeground?.()??this.host.foreground;}
     async resumeQueue(){
         if(!this.visible()||this.foreground||this.resumeTask||this.preparing||this.buildingInitialization)return;
+        // The extension also runs on the Tavern welcome screen while chat loads.
+        // Automatic work resumes after a real chat identity becomes available.
+        if(!this.host.identity().chatKey)return;
         try{
             await this.controlTask;
             if(this.needsRefresh&&!this.running&&!this.auxiliary){await this.resume();return;}
@@ -179,7 +182,7 @@ export class BBPresetsApp {
         const chatKey=this.host.identity().chatKey;
         if(this.preparedGeneration?.chatKey===chatKey&&!this.preparedGeneration.cancelled)return this.preparedGeneration;
         this.sendCancelled=false;
-        const prepared={chatKey,epoch:this.epoch};
+        const prepared={chatKey,epoch:this.epoch,controlCancellation:this.controlCancellation};
         prepared.promise=this.prepareGeneration(prepared).then(value=>({value}),error=>({error}));
         this.preparedGeneration=prepared;return prepared;
     }
@@ -189,41 +192,45 @@ export class BBPresetsApp {
         this.host.foreground=true;
         if(!this.ready||!this.settings?.enabled||!this.author||!this.visible()||this.selectedKey!==this.host.identity().chatKey)return null;
         const epoch=this.epoch;
-        await this.controlTask;assert(epoch===this.epoch&&!prepared.cancelled,'资料已切换，本次准备已取消');
-        await this.reconcile();assert(epoch===this.epoch&&!prepared.cancelled,'资料已切换，本次准备已取消');
+        // Pending receipts, persistence and review belong to background work.
+        // Freeze committed records now; beforeGenerate validates their sources
+        // against the actual send context without waiting for queued edits.
         const frozenInspiration=copy(this.inspiration?.data??newDocument('inspiration','未选择灵感','unbound'));
+        const frozenWorldTask=copy(this.worldTask.data),frozenAuthor=copy(this.author.data);
         // An in-flight author request must release the shared main connection first.
         if(this.host.rawPending){this.requestState='等待酒馆主连接释放';this.changed();try{await this.host.waitRaw?.();assert(!this.host.rawPending,'酒馆主连接尚未释放，请稍后重发正文');}finally{this.requestState='';}}
         assert(epoch===this.epoch&&!this.sendCancelled,'资料已切换或生成已停止，本次正文未发送');
-        return {epoch,frozenInspiration,frozenWorldTask:copy(this.worldTask.data)};
+        return {epoch,frozenInspiration,frozenWorldTask,frozenAuthor};
     }
     async beforeGenerate(type='normal') {
         if(['quiet','impersonate'].includes(type))return;
+        if(!this.host.identity().chatKey){this.host.inject('');return;}
         const memoryChange=await this.followMemory();if(memoryChange?.switched)this.preparedGeneration=null;
         const prepared=this.preparedGeneration??this.startGenerationPreparation();
         let value;
         try{const result=await prepared.promise;if(result.error)throw result.error;value=result.value;}
         finally{if(this.preparedGeneration===prepared)this.preparedGeneration=null;}
         if(!value){this.host.inject('');return;}
-        const {epoch,frozenInspiration,frozenWorldTask}=value;
+        const {epoch,frozenInspiration,frozenWorldTask,frozenAuthor}=value;
         assert(epoch===this.epoch&&!prepared.cancelled&&!this.sendCancelled&&prepared.chatKey===this.host.identity().chatKey,'资料已切换或生成已停止，本次正文未发送');
         const atSend=await this.host.capture();
         assert(epoch===this.epoch&&!this.sendCancelled,'读取正文材料期间聊天已变化');
         const validInspiration=invalidateSources(frozenInspiration,atSend.chatKey,atSend.sources);
-        const token=uid(),frozen=injection(copy(this.author.data),validInspiration,this.settings,atSend,token,invalidateSources(frozenWorldTask,atSend.chatKey,atSend.sources));
-        const baseHash=await inspirationHash(validInspiration);
-        assert(epoch===this.epoch&&!this.sendCancelled,'准备注入期间聊天已变化');
+        const validWorldTask=invalidateSources(frozenWorldTask,atSend.chatKey,atSend.sources);
+        const token=uid(),frozen=injection(invalidateSources(frozenAuthor,atSend.chatKey,atSend.sources),validInspiration,this.settings,atSend,token,validWorldTask);
+        const baseHash=await inspirationHash(validInspiration),worldTaskHash=await inspirationHash(validWorldTask);
+        assert(epoch===this.epoch&&!prepared.cancelled&&!this.sendCancelled&&prepared.controlCancellation===this.controlCancellation&&prepared.chatKey===this.host.identity().chatKey,'准备注入期间聊天、资料已变化或生成已停止');
         this.currentSources=atSend.sources;
-        this.generation=this.inspiration?{token,epoch,storyId:this.inspiration.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,worldTaskId:this.worldTask.data.id,worldTaskHash:await inspirationHash(frozenWorldTask),worldTaskIds:frozen.worldTaskIds,visibleIds:frozen.visibleIds,lineIds:frozen.lineIds,inspirationIds:frozen.inspirationIds,counts:frozen.counts,features:frozen.features,controlEnabled:frozen.controlEnabled}:null;
+        this.generation=this.inspiration?{token,epoch,controlCancellation:prepared.controlCancellation,storyId:this.inspiration.data.id,chatKey:atSend.chatKey,sources:atSend.sources,baseHash,inspirationRecords:validInspiration.records.filter(r=>frozen.inspirationIds.includes(r.id)),worldTaskId:this.worldTask.data.id,worldTaskHash,worldTaskIds:frozen.worldTaskIds,visibleIds:frozen.visibleIds,lineIds:frozen.lineIds,inspirationIds:frozen.inspirationIds,counts:frozen.counts,features:frozen.features,controlEnabled:frozen.controlEnabled}:null;
         this.host.inject(frozen.text);this.lastInjection=frozen;this.controlStatus=frozen.controlEnabled?`已注入 v5 协议；灵感 ${frozen.counts.inspiration??0} 条 · 世界任务 ${frozen.counts.worldTask??0} 条，等待回复`:'本轮按注入开关提供资料，未要求灵感维护';this.changed();
     }
     async receiveControl(floor,generation=this.generation){
-        if(!generation||generation!==this.generation||this.sendCancelled||generation.epoch!==this.epoch||generation.storyId!==this.inspiration?.data.id||!this.settings.enabled)return;
+        if(!generation||generation.controlCancellation!==this.controlCancellation||this.sendCancelled||generation.epoch!==this.epoch||generation.storyId!==this.inspiration?.data.id||!this.settings.enabled)return;
         const context=await this.host.capture(),row=context.rows.find(r=>r.floor===Number(floor));
         if(!row||row.role!=='assistant'||context.chatKey!==generation.chatKey||generation.epoch!==this.epoch||generation.storyId!==this.inspiration?.data.id)return;
         const source=context.sources.find(s=>s.id===row.id);
         this.currentSources=context.sources;
-        const guard=()=>generation===this.generation&&!this.sendCancelled&&this.settings.enabled&&generation.epoch===this.epoch&&generation.storyId===this.inspiration?.data.id&&context.chatKey===this.host.identity().chatKey;
+        const guard=()=>generation.controlCancellation===this.controlCancellation&&!this.sendCancelled&&this.settings.enabled&&generation.epoch===this.epoch&&generation.storyId===this.inspiration?.data.id&&context.chatKey===this.host.identity().chatKey;
         const activity={id:generation.token,chatKey:context.chatKey,source,prefixHash:sourcePrefixes(context.sources.filter(s=>s.floor<=row.floor)).get(source.id),at:Date.now(),...generation.counts,status:generation.controlEnabled===false?'not-requested':'missing',titleChanged:false,chapterChanged:false,revisionRequested:false};
         const saveActivity=d=>{d.activity=[...(d.activity??[]).filter(a=>a.source.id!==source.id),activity].slice(-20);return d;};
         if(generation.controlEnabled===false||!row.text.includes('[BBP_CONTROL]')){
@@ -433,7 +440,7 @@ export class BBPresetsApp {
             const affected=d.history.filter(h=>h.feedbackIds?.includes(id)).flatMap(h=>h.changes.map(c=>c.id));d.excluded=[...new Set([...d.excluded,...affected])];d.conflicts.push({id:uid(),reason:'feedback-withdrawn',feedbackId:id,at:Date.now()});return d;
         });
     }
-    async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.generation=null;this.host.controlFilter?.(settings.enabled);this.host.inject('');this.lastInjection={text:'',omitted:0};if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
+    async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.controlCancellation++;this.generation=null;this.host.controlFilter?.(settings.enabled);this.host.inject('');this.lastInjection={text:'',omitted:0};if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
     async retryJobs(id=null,target=null){
         assert(!this.running&&!this.auxiliary,'当前请求尚未结束，请稍后重试');
         const selected=this.jobs.filter(x=>(!id||x.job.id===id)&&(!target||x.target===target)&&['feedback','worldTask','inspirationPlan'].includes(x.job.kind));assert(selected.length,'没有可重试的任务');

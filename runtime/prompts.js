@@ -1,6 +1,6 @@
 import {assert,copy} from '../core/model.js';
 import {parseModelJSON} from '../core/json.js';
-import {PROMPTS,promptText} from '../core/prompt-templates.js';
+import {PROMPTS,promptText,CREATIVE_INSTRUCTIONS,TAGGED_CREATIVE_INSTRUCTIONS} from '../core/prompt-templates.js';
 import {inspirationRoom,storyText} from '../core/story.js';
 
 export const INITIALIZATION_TEMPLATE=PROMPTS.questions.text;
@@ -34,6 +34,9 @@ export function maintenancePrompt(job,story,profile,material=maintenanceMaterial
 }
 export function injection(profile,inspiration,settings,context={sources:[],rows:[],chatKey:''},token='',worldTask=null) {
     const modern=worldTask?.type==='worldTask';
+    const savedTemplate=settings.prompts?.creativeInjectionV5;
+    // Keep saved templates intact; tag the exact previous default before inserting material.
+    const promptSettings=modern&&savedTemplate?.includes(CREATIVE_INSTRUCTIONS)&&!savedTemplate.includes('<BBPresets_CreativeInstructions>')?{...settings,prompts:{...settings.prompts,creativeInjectionV5:savedTemplate.replace(CREATIVE_INSTRUCTIONS,TAGGED_CREATIVE_INSTRUCTIONS)}}:settings;
     const features={author:settings.injectAuthor!==false,story:false,inspiration:settings.injectInspiration!==false,...(modern?{worldTask:settings.injectWorldTask!==false}:{})};
     const active=doc=>doc.records.filter(r=>r.status==='active'&&!doc.excluded.includes(r.id));
     // Only an independently selected inspiration archive can participate in generation.
@@ -46,7 +49,7 @@ export function injection(profile,inspiration,settings,context={sources:[],rows:
         if(features.author)chunks.push(`<BBPresets_WritingGuidelines>\n${json({author:profile.title,guidelines})}\n</BBPresets_WritingGuidelines>`);
         if(modern&&features.worldTask)chunks.push(`<BBPresets_WorldTask>\n${json({tasks,canCreate:settings.worldTaskAiEnabled===true&&worldTask.records.filter(r=>r.status==='active').length<(settings.worldTaskCapacity??5)})}\n</BBPresets_WorldTask>`);
         if(features.inspiration)chunks.push(`<BBPresets_Inspiration>\n${json({items,canAdd:room.canAdd,aiMaintenance:settings.inspirationAiEnabled!==false,pending:room.pending,capacity:room.capacity})}\n</BBPresets_Inspiration>`);
-        return chunks.length?promptText(settings,modern?'creativeInjectionV5':'inspirationInjection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:''):'';
+        return chunks.length?promptText(promptSettings,modern?'creativeInjectionV5':'inspirationInjection',{material:chunks.join('\n')})+(control?`\n<BBPresets_ControlInstructions>\n${control}\n</BBPresets_ControlInstructions>`:''):'';
     };
     assert(render().length<=settings.injectionChars,'正文注入预算不足以包含说明和灵感协议，请提高预算');
     let omitted=0;
