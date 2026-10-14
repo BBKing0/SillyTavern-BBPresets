@@ -107,4 +107,9 @@
 .bbp-binding-row { border-top:1px solid var(--bbp-border); padding:.65rem 0; overflow-wrap:anywhere; }
 .bbp-dialog .bbp-delete { opacity:.85; }
 .bbp-world-task h3 { overflow-wrap:anywhere; }
+.bbp-idea-overlay { position:fixed; inset:0; z-index:3; display:flex; align-items:center; justify-content:center; padding:1rem; background:rgba(0,0,0,.55); pointer-events:auto; }
+.bbp-idea-overlay .bbp-idea-dialog { position:relative; inset:auto; width:min(36rem,100%); max-height:85dvh; overflow-y:auto; background:var(--bbp-bg); border:1px solid var(--bbp-border); border-radius:.7rem; padding:1rem; }
+.bbp-idea-dialog > * { flex-shrink:0; }
+.bbp-idea-dialog h2 { margin-top:0; }
+.bbp-repair-editor { border-top:1px solid var(--bbp-border); margin-top:.8rem; padding-top:.5rem; }
 @media(max-width:600px) { .bbp-embedded nav.bbp-groups { grid-template-columns:repeat(4,minmax(0,1fr)); } .bbp-world-task > button { width:calc(100% - .4rem); } }

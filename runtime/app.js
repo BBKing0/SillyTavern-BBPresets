@@ -443,7 +443,7 @@ export class BBPresetsApp {
     async saveSettings(settings,expected){validateSettings(settings);await this.edit('profile',d=>{if(expected)assert(same(d.settings,expected),'已保存的设置发生了变化，当前输入仍保留；请载入已保存设置后重新调整');d.settings=settings;return d;});this.controller?.abort();this.auxController?.abort();this.controlCancellation++;this.generation=null;this.host.controlFilter?.(settings.enabled);this.host.inject('');this.lastInjection={text:'',omitted:0};if(!settings.enabled){this.waitResolve?.('cancel');this.host.inject('');}}
     async retryJobs(id=null,target=null){
         assert(!this.running&&!this.auxiliary,'当前请求尚未结束，请稍后重试');
-        const selected=this.jobs.filter(x=>(!id||x.job.id===id)&&(!target||x.target===target)&&['feedback','worldTask','inspirationPlan'].includes(x.job.kind));assert(selected.length,'没有可重试的任务');
+        const selected=this.jobs.filter(x=>(!id||x.job.id===id)&&(!target||x.target===target)&&!(x.job.kind==='worldTask'&&x.job.key.startsWith('world-idea:')&&x.job.approval!=='approved')&&['feedback','worldTask','inspirationPlan'].includes(x.job.kind));assert(selected.length,'没有可重试的任务；AI 新任务提议须先批准');
         for(const scope of new Set(selected.map(x=>x.target)))await this.edit(scope,d=>{for(const j of d.jobs)if(selected.some(x=>x.target===scope&&x.job.id===j.id)){j.state='queued';delete j.error;delete j.retryable;}return d;});
         await this.drain();
         return this.jobs.some(x=>x.job.state==='failed')?'仍有失败任务，请查看任务原因和原始响应':this.jobs.length?'任务已排队，正在等待连接空闲':this.proposals.length?'结果已生成，等待应用提案':'任务已完成并应用';
@@ -459,6 +459,10 @@ export class BBPresetsApp {
     async createWorldTaskArchive(title,options){return this.worldRuntime.createArchive(title,options);}
     async selectWorldTask(id){return this.selectArchive('worldTask',id);}
     async generateWorldTask(theme,options){return this.worldRuntime.generate(theme,options);}
+    async decideWorldTaskIdea(id,accept,options){return this.worldRuntime.decideIdea(id,accept,options);}
+    async worldTaskRepair(id,target){return this.worldRuntime.repairJob(id,target);}
+    async saveWorldTaskRepair(id,target,value,options){return this.worldRuntime.saveRepair(id,target,value,options);}
+    async formatWorldTaskRepair(id,target,text,options){return this.worldRuntime.formatRepair(id,target,text,options);}
     async advanceWorldTask(id){return this.worldRuntime.advance(id);}
     async loadSavedWorldTask(id){return this.worldRuntime.loadSaved(id);}
     async deleteArchive(type,id){return this.worldRuntime.deleteArchive(type,id);}

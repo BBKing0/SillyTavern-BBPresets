@@ -2,13 +2,14 @@ import {sha256} from './digest.js';
 import {validateDraft} from './initialization.js';
 import {validatePrompts} from './prompt-templates.js';
 import {sourcePrefixes} from './source-prefix.js';
+import {parseWorldTaskFloors} from './world-task-context.js';
 export const SCHEMA = 1;
 export const LEGACY_OUTLINE_KINDS = ['core','line','chapter','clue'];
 export const OUTLINE_KINDS = ['storyline',...LEGACY_OUTLINE_KINDS];
 export const AUTHOR_KINDS = ['guide','focus','experience'];
 export const KINDS = [...OUTLINE_KINDS, 'inspiration', 'worldTask', 'world', 'guide', 'focus', 'experience'];
 export const MEMORY_COLLECTIONS = Object.freeze(['timeline','milestones','npc','items','memories']);
-export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, inspirationConnection:'main', worldTaskCapacity:5, worldTaskConnection:'main', worldTaskAiEnabled:false, worldTaskRecognition:'delayed', worldTaskView:'safe', worldTaskMemoryMode:'vector', worldTaskMemoryModes:Object.freeze(Object.fromEntries(MEMORY_COLLECTIONS.map(key=>[key,'vector']))), injectWorldTask:true, injectAuthor:true, injectStory:false, injectInspiration:true, prompts:{} });
+export const DEFAULTS = Object.freeze({ enabled: true, mode: 'semi', timing: 'background', connection: 'custom', plotConnection:'main', frequency: 1, reflectionFrequency: 8, reflectionEnabled: false, contextRounds: 6, maxInputChars: 40000, injectionChars: 12000, outlineInjection:'requested', outlineMaxEntries:3, outlineDirectoryChars:1200, timeoutSeconds: 90, endpoint: '', model: '', memoryRead: false, memoryFollow: false, feedbackThreshold:5, waitOutline:true, inspirationCapacity:20, inspirationInjectCount:3, inspirationAiEnabled:true, inspirationConnection:'main', worldTaskCapacity:5, worldTaskConnection:'main', worldTaskAiEnabled:false, worldTaskRecognition:'delayed', worldTaskView:'safe', worldTaskContextMode:'recent', worldTaskContextFloors:'', worldTaskMemoryMode:'vector', worldTaskMemoryModes:Object.freeze(Object.fromEntries(MEMORY_COLLECTIONS.map(key=>[key,'vector']))), injectWorldTask:true, injectAuthor:true, injectStory:false, injectInspiration:true, prompts:{} });
 export function recordCounts(doc) {
     const counts={outline:0,writing:0,inspiration:0,worldTask:0,reference:0,archived:0,total:doc.records.length};
     for(const r of doc.records){if(r.status==='archived')counts.archived++;counts[r.kind==='inspiration'?'inspiration':r.kind==='worldTask'?'worldTask':OUTLINE_KINDS.includes(r.kind)?'outline':AUTHOR_KINDS.includes(r.kind)?'writing':'reference']++;}
@@ -121,6 +122,9 @@ export function validateSettings(s) {
     assert(s.worldTaskAiEnabled===undefined||typeof s.worldTaskAiEnabled==='boolean','AI 世界任务触发设置无效');
     assert(s.worldTaskRecognition===undefined||['delayed','immediate'].includes(s.worldTaskRecognition),'世界任务识别深度无效');
     assert(s.worldTaskView===undefined||['safe','brief','spoiler'].includes(s.worldTaskView),'世界任务剧透显示设置无效');
+    assert(s.worldTaskContextMode===undefined||['recent','none','custom'].includes(s.worldTaskContextMode),'世界任务正文上下文方式无效');
+    assert(s.worldTaskContextFloors===undefined||text(s.worldTaskContextFloors,2000),'世界任务楼层范围须为最多 2000 字符的文字');
+    if(s.worldTaskContextFloors?.trim()||s.worldTaskContextMode==='custom')assert(parseWorldTaskFloors(s.worldTaskContextFloors??'').length,'请填写世界任务要注入的正文楼层；不需要正文时请选择“不注入正文”');
     assert(s.worldTaskMemoryMode===undefined||['vector','full','mixed'].includes(s.worldTaskMemoryMode),'世界任务记忆注入方式无效');
     if(s.worldTaskMemoryModes!==undefined){
         assert(s.worldTaskMemoryModes&&typeof s.worldTaskMemoryModes==='object'&&!Array.isArray(s.worldTaskMemoryModes),'世界任务分类记忆注入设置无效');

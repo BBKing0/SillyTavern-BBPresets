@@ -53,9 +53,9 @@ export function injection(profile,inspiration,settings,context={sources:[],rows:
     };
     assert(render().length<=settings.injectionChars,'正文注入预算不足以包含说明和灵感协议，请提高预算');
     let omitted=0;
-    const add=(list,item)=>{list.push(item);if(render().length>settings.injectionChars){list.pop();omitted++;return false;}used.push(item.id);return true;};
+    const add=(list,item,id=item.id)=>{list.push(item);if(render().length>settings.injectionChars){list.pop();omitted++;return false;}used.push(id);return true;};
     if(modern&&features.worldTask)for(const r of active(worldTask))add(tasks,{id:r.id,title:r.title,nextNode:r.nextNode,locked:r.locked||r.blocks.some(b=>b.locked)});
-    if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))add(guidelines,{id:r.id,title:r.title,truth:r.truth,text:storyText(r)});
+    if(features.author)for(const r of active(profile).filter(r=>['guide','focus'].includes(r.kind)))add(guidelines,{title:r.title,text:storyText(r)},r.id);
     if(features.inspiration)for(const r of active(doc).sort((a,b)=>Number(b.creator==='user')-Number(a.creator==='user'))){if(items.length>=(settings.inspirationInjectCount??3))break;add(items,{id:r.id,text:storyText(r),creator:r.creator,locked:r.locked||r.blocks.some(b=>b.locked)});}
     return {text:render(),features,omitted,visibleIds:[],lineIds:[],inspirationIds:items.map(r=>r.id),worldTaskIds:tasks.map(r=>r.id),recordIds:used,counts:{outline:0,writing:guidelines.length,directory:0,inspiration:items.length,...(modern?{worldTask:tasks.length}:{})},controlEnabled:Boolean(control)};
 }

@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "entry.css",
   "author": "BBPresets",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "generate_interceptor": "bbPresetsInterceptor"
 }

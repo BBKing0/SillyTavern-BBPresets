@@ -1,13 +1,15 @@
 import {assert,copy,hash,same,uid,newDocument,applyChanges,restoreDocument} from '../core/model.js';
 import {storyControlChanges,inspirationRoom} from '../core/story.js';
 import {sourcePrefixes} from '../core/source-prefix.js';
-import {parseWorldTaskControl,parseWorldTaskResult,parseInspirationPlanResult} from '../core/world-task.js';
+import {parseWorldTaskControl,parseWorldTaskResult,parseInspirationPlanResult,inspectWorldTaskResult,worldTaskDraftResult} from '../core/world-task.js';
+import {selectWorldTaskContext} from '../core/world-task-context.js';
 import {promptText} from '../core/prompt-templates.js';
 import {responseText} from '../core/json.js';
 
 const stateHash=d=>hash(JSON.stringify({records:d.records,excluded:d.excluded}));
 const clean=r=>{const v=copy(r);delete v.sources;return v;};
 const active=d=>d.records.filter(r=>r.status==='active'&&!d.excluded.includes(r.id));
+const needsApproval=job=>job.kind==='worldTask'&&job.key.startsWith('world-idea:')&&job.approval!=='approved';
 // Detailed work is persistent; the normal reply carries only small triggers.
 export class WorldTaskRuntime {
     constructor(app){this.app=app;this.memoryChecking=false;}
@@ -81,14 +83,18 @@ export class WorldTaskRuntime {
     async queue(ownerId,{mode='create',idea='',signals=[],source=null,sources=[],immediate=false,key=uid(),prefixHash=null,expectedHash=null}={}){
         const a=this.app,w=a.documentFor(ownerId);assert(w,'任务存档已切换');
         const job={id:uid(),kind:w.data.type==='worldTask'?'worldTask':'inspirationPlan',key,connection:w.data.type==='worldTask'?(a.settings.worldTaskConnection??'main'):(a.settings.inspirationConnection??'main'),chatKey:a.host.identity().chatKey??'',input:JSON.stringify({mode,idea,signals}),signal:{mode,ids:signals.map(x=>x.id)},sources:copy(sources).map(s=>s.id===source?.id&&prefixHash?{...s,prefixHash}:s),anchor:source,source,immediate,prefixHash,expectedHash,feedback:[],at:Date.now(),attempts:0,state:'queued'};
+        if(needsApproval(job))job.approval='pending';
         await a.edit(ownerId,d=>{if(d.processed.includes(key)||d.jobs.some(j=>j.key===key))return d;assert(d.jobs.length<60,'任务队列已达上限');d.jobs.push(job);return d;});return job;
     }
-    async generate(theme,{connection}={}){
+    async generate(theme,{connection,formatOnly=false}={}){
         const a=this.app;assert(a.ready&&a.settings.enabled&&theme?.trim(),'请输入任务主题或想体验的情节并启用插件');
-        assert(theme.length<=4000,'主题最多 4000 字符');assert(a.worldTask.data.records.filter(r=>r.status==='active').length<(a.settings.worldTaskCapacity??5),'世界任务已达上限，请先归档');
-        const epoch=a.epoch,context=await a.host.capture();assert(epoch===a.epoch,'读取主题期间存档已切换');
-        const job=await this.queue(a.worldTask.data.id,{idea:theme.trim(),sources:context.sources,source:context.sources.at(-1)??null,prefixHash:sourcePrefixes(context.sources).get(context.sources.at(-1)?.id)??null,immediate:true});if(connection){assert(['main','custom'].includes(connection),'连接选择无效');await a.edit(a.worldTask.data.id,d=>{d.jobs.find(j=>j.id===job.id).connection=connection;return d;});}await a.drain();
-        return a.worldTask.data.jobs.find(j=>j.id===job.id)?.state==='failed'?'生成失败，主题已保留；请在任务页重试':a.worldTask.data.jobs.some(j=>j.id===job.id)?'已排队，等待模型连接空闲':'世界任务已生成并保存';
+        assert(theme.length<=(formatOnly?30000:4000),formatOnly?'已有文字最多 30000 字符':'主题最多 4000 字符');assert(a.worldTask.data.records.filter(r=>r.status==='active').length<(a.settings.worldTaskCapacity??5),'世界任务已达上限，请先归档');
+        if(connection)assert(['main','custom'].includes(connection),'连接选择无效');
+        const epoch=a.epoch,context=formatOnly?{sources:[]}:await a.host.capture();assert(epoch===a.epoch,'读取主题期间存档已切换');
+        const job=await this.queue(a.worldTask.data.id,{idea:theme.trim(),sources:context.sources,source:context.sources.at(-1)??null,prefixHash:sourcePrefixes(context.sources).get(context.sources.at(-1)?.id)??null,immediate:true});
+        if(connection||formatOnly)await a.edit(a.worldTask.data.id,d=>{const j=d.jobs.find(j=>j.id===job.id);if(connection)j.connection=connection;if(formatOnly)j.input=JSON.stringify({...JSON.parse(j.input),formatOnly:true});return d;});await a.drain();
+        if(epoch!==a.epoch)return '请求期间已切换资料；旧结果不会写入当前档，请回原档查看任务';
+        const saved=a.worldTask?.data.jobs.find(j=>j.id===job.id);return saved?.repair?'返回内容待补全，已有文字已保留；请在任务页补齐，无需重新请求':saved?.state==='failed'?'生成失败，主题已保留；请在任务页重试':saved?'已排队，等待模型连接空闲':'世界任务已生成并保存';
     }
     async advance(id){
         const a=this.app;assert(active(a.worldTask.data).some(r=>r.id===id),'任务不存在或已归档');const context=await a.host.capture();
@@ -96,9 +102,23 @@ export class WorldTaskRuntime {
     }
     async nextJob(){
         const a=this.app;if(!a.host.identity().chatKey)return null;
-        const queued=a.jobs.filter(({job})=>job.state==='queued'&&['worldTask','inspirationPlan'].includes(job.kind)&&(job.kind==='worldTask'?job.immediate||a.settings.injectWorldTask!==false&&(job.signal?.mode==='advance'||a.settings.worldTaskAiEnabled):a.settings.injectInspiration!==false&&a.settings.inspirationAiEnabled!==false));if(!queued.length)return null;
+        const queued=a.jobs.filter(({job})=>job.state==='queued'&&!needsApproval(job)&&['worldTask','inspirationPlan'].includes(job.kind)&&(job.kind==='worldTask'?job.immediate||a.settings.injectWorldTask!==false&&(job.signal?.mode==='advance'||a.settings.worldTaskAiEnabled):a.settings.injectInspiration!==false&&a.settings.inspirationAiEnabled!==false));if(!queued.length)return null;
+        const immediate=queued.find(({job})=>job.immediate&&job.chatKey===a.host.identity().chatKey);if(immediate)return immediate;
         const context=await a.host.capture(),latest=context.rows.findLast(r=>r.role==='assistant');
         return queued.find(({job})=>job.chatKey===context.chatKey&&(job.immediate||job.source&&latest&&latest.floor>job.source.floor))??null;
+    }
+    get pendingIdeas(){const a=this.app;return a.jobs.filter(({job})=>needsApproval(job)&&['queued','failed'].includes(job.state)&&job.chatKey===a.host.identity().chatKey);}
+    async readyIdea(){
+        const a=this.app;if(!a.ready||!a.visible()||!a.settings.enabled||a.settings.injectWorldTask===false||!a.settings.worldTaskAiEnabled||!this.pendingIdeas.length)return null;
+        const epoch=a.epoch,cancellation=a.controlCancellation,context=await a.host.capture(),latest=context.rows.findLast(r=>r.role==='assistant'),prefixes=sourcePrefixes(context.sources);
+        if(epoch!==a.epoch||cancellation!==a.controlCancellation||!a.ready||!a.visible()||!a.settings.enabled||a.settings.injectWorldTask===false||!a.settings.worldTaskAiEnabled||context.chatKey!==a.host.identity().chatKey)return null;
+        return this.pendingIdeas.find(({job})=>latest&&job.source&&latest.floor>job.source.floor&&prefixes.get(job.source.id)===job.prefixHash)??null;
+    }
+    async decideIdea(id,accept,{idea,connection}={}){
+        const a=this.app,entry=this.pendingIdeas.find(({job})=>job.id===id);assert(entry,'提议已处理或存档已切换');
+        if(accept){assert(a.settings.enabled&&a.settings.injectWorldTask!==false&&a.settings.worldTaskAiEnabled,'请先启用 AI 世界任务提议');assert(idea?.trim()&&idea.length<=4000,'请填写最多 4000 字符的任务想法');assert(['main','custom'].includes(connection),'连接选择无效');const context=await a.host.capture();assert(context.chatKey===entry.job.chatKey&&sourcePrefixes(context.sources).get(entry.job.source.id)===entry.job.prefixHash,'提议来源已变化，请拒绝旧提议后重新创建');}
+        await a.edit(entry.target,d=>{const j=d.jobs.find(j=>j.id===id);assert(j&&needsApproval(j),'提议已处理');if(accept){j.input=JSON.stringify({...JSON.parse(j.input),idea:idea.trim()});j.connection=connection;j.approval='approved';j.immediate=true;j.state='queued';delete j.error;}else{d.jobs=d.jobs.filter(j=>j.id!==id);d.processed=[...new Set([...d.processed,j.key])];}return d;});
+        if(accept)await a.drain();return accept?'提议已批准，请查看世界任务与队列':'已拒绝此想法，不会调用生成 API';
     }
     async receiveControl(row,g,context){
         const a=this.app,source=context.sources.find(s=>s.id===row.id),sources=context.sources.filter(s=>s.floor<=row.floor),prefixHash=sourcePrefixes(sources).get(source.id);
@@ -131,7 +151,7 @@ export class WorldTaskRuntime {
         }
         // The receipt is a durable outbox. A queue-save failure can be repaired after reload.
         await this.flushOutbox(context);
-        a.controlStatus=`灵感使用归档 ${control.inspiration.usedIds.length} 条；创作触发已保存，隔层想法将在下一条 AI 回复完成后处理`;a.changed();
+        a.controlStatus=`灵感使用归档 ${control.inspiration.usedIds.length} 条；创作触发已保存，隔一条完整回复后展开灵感，世界任务新想法先提醒确认`;a.changed();
     }
     async flushOutbox(context=null){
         const a=this.app;if(!a.ready||!a.settings.enabled||!a.host.identity().chatKey)return;context??=await a.host.capture();
@@ -150,34 +170,59 @@ export class WorldTaskRuntime {
         const a=this.app;if(a.host.worldTaskSeed)return a.host.worldTaskSeed(budget,options);
         const world=await a.host.seed?.(budget)??'';return {world:typeof world==='string'?world:JSON.stringify(world),memory:null,memorySnapshot:null};
     }
+    options(job){return {mode:JSON.parse(job.input).mode,ids:job.signal?.ids??[],capacity:this.app.settings.worldTaskCapacity??5};}
+    async repairJob(id,ownerId){const j=this.app.documentFor(ownerId)?.data.jobs.find(j=>j.id===id);assert(j?.kind==='worldTask'&&j.repair,'此任务没有可补全的响应');return copy(j.repair);}
+    async validateSources(job){
+        const a=this.app;assert(a.host.identity().chatKey===job.chatKey,'请回到任务所属聊天处理');
+        if(!job.sources.length&&!job.prefixHash)return;
+        const context=await a.host.capture(),hashes=new Map(context.sources.map(s=>[s.id,s.hash]));
+        assert(context.chatKey===job.chatKey&&job.sources.every(s=>hashes.get(s.id)===s.hash)&&(!job.prefixHash||sourcePrefixes(context.sources).get(job.source.id)===job.prefixHash),'任务来源已被重抽、编辑、删除或重新排序，请重新生成');
+    }
+    async saveRepair(id,ownerId,value,{json=false}={}){
+        const a=this.app;assert(a.ready&&!a.running&&!a.auxiliary,'请等待当前请求结束后补全');const epoch=a.epoch;
+        await a.edit(ownerId,async d=>{const j=d.jobs.find(j=>j.id===id);assert(j?.kind==='worldTask'&&j.repair,'补全目标已变化');
+            await this.validateSources(j);if(j.repair.checkMemory){const memory=await this.memory();assert(this.signature(memory)===j.repair.memoryIdentity&&(memory?.revisionSignature??null)===j.repair.memoryRevision,'原响应使用的记忆已变化，请重新生成');}
+            assert(await stateHash(d)===j.repair.baseHash,'响应返回后资料已修改，请重新生成以保留后写内容');
+            const changes=json?parseWorldTaskResult(value,d,this.options(j)):worldTaskDraftResult(value,d,this.options(j));
+            assert(epoch===a.epoch&&a.settings.enabled,'补全期间存档已切换或插件已停用');const next=applyChanges(d,changes,{origin:'worldTask',sources:j.sources,key:j.key,anchor:j.anchor});next.jobs=next.jobs.filter(x=>x.id!==id);return next;
+        });a.stats.success++;return '补全内容已通过校验并保存，未调用 API';
+    }
+    async formatRepair(id,ownerId,text,{connection}={}){
+        const a=this.app;assert(a.ready&&!a.running&&!a.auxiliary,'请等待当前请求结束');assert(text?.trim()&&text.length<=30000,'待整理文字不能为空，最多 30000 字符');if(connection)assert(['main','custom'].includes(connection),'连接选择无效');
+        await a.edit(ownerId,async d=>{const j=d.jobs.find(j=>j.id===id);assert(j?.kind==='worldTask'&&j.repair,'补全目标已变化');assert(await stateHash(d)===j.repair.baseHash,'响应返回后资料已修改，请重新生成');await this.validateSources(j);j.expectedHash=j.repair.baseHash;j.input=JSON.stringify({...JSON.parse(j.input),idea:text,formatOnly:true});j.state='queued';j.immediate=true;if(connection)j.connection=connection;delete j.error;return d;});await a.drain();return '格式整理已处理，请查看世界任务与队列';
+    }
     async runJob(job,ownerId){
         const a=this.app,epoch=a.epoch,w=a.documentFor(ownerId),controller=new AbortController();a.controller=controller;a.activeJob={...job,ownerId};
         let selectionToken;const guard=()=>epoch===a.epoch&&!controller.signal.aborted&&a.documentFor(ownerId)&&a.settings.enabled&&(selectionToken===undefined||a.host.memorySelectionToken?.()===selectionToken);
         try{
-            const input=JSON.parse(job.input),context=await a.host.capture();assert(context.chatKey===job.chatKey,'任务所属聊天已切换');
-            const hashes=new Map(context.sources.map(s=>[s.id,s.hash]));assert(job.sources.every(s=>hashes.get(s.id)===s.hash),'触发来源已被重抽、编辑或删除，请重新生成');
+            assert(!needsApproval(job),'AI 世界任务提议尚未获得用户批准');
+            const input=JSON.parse(job.input),formatOnly=job.kind==='worldTask'&&input.formatOnly===true,context=formatOnly?{chatKey:a.host.identity().chatKey,sources:[],rows:[]}:await a.host.capture();assert(context.chatKey===job.chatKey,'任务所属聊天已切换');
+            const hashes=new Map(context.sources.map(s=>[s.id,s.hash]));if(formatOnly)await this.validateSources(job);else assert(job.sources.every(s=>hashes.get(s.id)===s.hash),'触发来源已被重抽、编辑或删除，请重新生成');
             if(job.kind==='inspirationPlan')assert(inspirationRoom(w.data,a.settings,context).canAdd,'灵感新增间隔不足或待用库已满，已保留想法；间隔两轮后可重试');
-            if(job.prefixHash)assert(sourcePrefixes(context.sources).get(job.source.id)===job.prefixHash,'触发之前的上下文已变化，请重新生成');
+            if(!formatOnly&&job.prefixHash)assert(sourcePrefixes(context.sources).get(job.source.id)===job.prefixHash,'触发之前的上下文已变化，请重新生成');
             if(job.kind==='worldTask'&&input.mode==='create')assert(w.data.records.filter(r=>r.status==='active').length<(a.settings.worldTaskCapacity??5),'世界任务已达上限；未请求模型，请先归档');const baseHash=await stateHash(w.data);assert(!job.expectedHash||job.expectedHash===baseHash,'世界任务阶段已变化，旧进展信号不能继续推进；请让正文重新识别当前方向');const settings=a.taskSettings(job.kind,job),budget=settings.maxInputChars;
             const current=job.kind==='worldTask'?input.mode==='advance'?w.data.records.filter(r=>job.signal.ids.includes(r.id)).map(clean):active(w.data).map(clean):active(w.data).map(clean);
             assert(input.mode!=='advance'||current.length===job.signal.ids.length,'待推进任务已删除或不再可用');
             const cutoff=job.immediate?Infinity:job.source.floor;
-            const rows=context.rows.filter(r=>r.floor<=cutoff).slice(-(settings.contextRounds??6)*2).map(r=>({role:r.role,text:r.text.replace(/\[BBP_CONTROL\][\s\S]*?\[\/BBP_CONTROL\]/g,'')}));
-            const base={input,current,context:rows,author:active(a.author.data).map(clean)};const available=budget-JSON.stringify(base).length-1000;assert(available>=2000,'任务主体与上下文超过材料预算，请提高预算或减少上下文轮数');
+            const rows=formatOnly?[]:job.kind==='worldTask'?selectWorldTaskContext(context,settings,{cutoff}):context.rows.filter(r=>r.floor<=cutoff).slice(-(settings.contextRounds??6)*2).map(r=>({role:r.role,text:r.text.replace(/\[BBP_CONTROL\][\s\S]*?\[\/BBP_CONTROL\]/g,'')}));
+            const base=formatOnly?{text:input.idea,mode:input.mode,ids:job.signal.ids}:{input,current,context:rows,author:active(a.author.data).map(clean)};const available=budget-JSON.stringify(base).length-1000;assert(available>=2000,'任务主体与上下文超过材料预算，请提高预算或减少上下文轮数');
             const memoryOptions={...(job.kind==='worldTask'?{mode:settings.worldTaskMemoryMode??'vector',categories:settings.worldTaskMemoryModes,query:[input.idea,...input.signals.map(s=>s.reason??''),...current.map(r=>[r.title,r.summary,r.nextNode].filter(Boolean).join('\n')),...rows.map(r=>r.text)].filter(Boolean).join('\n\n')}:{mode:'full'}),signal:controller.signal};
-            const seed=await this.seed(available,memoryOptions);selectionToken=a.host.memorySelectionToken?.();const material={...base,world:seed.world,memory:seed.memory,notes:seed.notes??[]};assert(JSON.stringify(material).length<=budget,'世界任务完整材料超过预算，未发送；请提高预算');assert(guard(),'准备材料期间存档已切换');
-            await a.edit(ownerId,d=>{const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已失效');j.attempts++;return d;},{guard});
-            const key=job.kind==='inspirationPlan'?'inspirationPlan':input.mode==='advance'?'worldTaskAdvance':'worldTaskCreate';
+            const seed=formatOnly?{}:await this.seed(available,memoryOptions);if(!formatOnly)selectionToken=a.host.memorySelectionToken?.();const material=formatOnly?base:{...base,world:seed.world,memory:seed.memory,notes:seed.notes??[]};assert(JSON.stringify(material).length<=budget,'世界任务完整材料超过预算，未发送；请提高预算');assert(guard(),'准备材料期间存档已切换');
+            await a.edit(ownerId,d=>{const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已失效');j.attempts++;if(job.kind==='worldTask')j.contextFloors=rows.map(r=>r.floor);return d;},{guard});
+            const key=formatOnly?'worldTaskFormat':job.kind==='inspirationPlan'?'inspirationPlan':input.mode==='advance'?'worldTaskAdvance':'worldTaskCreate';
             const prompt=promptText(settings,key,{contract:promptText(settings,job.kind==='inspirationPlan'?'inspirationPlanContract':'worldTaskContract'),material:JSON.stringify(material)});
             const promptHash=await hash(JSON.stringify([prompt,settings.connection,settings.model,settings.endpoint])),cacheKey=`result:${ownerId}:${job.id}`,cached=a.resultCache.get(cacheKey)??await a.readLocal(cacheKey);
             const result=cached?.baseHash===baseHash&&cached?.promptHash===promptHash?cached.result:await a.request(prompt,settings,controller.signal);
             await a.writeLocal(`diagnostic:${ownerId}:${job.id}`,{text:responseText(result).slice(0,200000),at:Date.now(),kind:job.kind});assert(guard(),'任务已取消，晚到结果未应用');
-            const latest=await a.host.capture(),now=new Map(latest.sources.map(s=>[s.id,s.hash]));assert(latest.chatKey===job.chatKey&&job.sources.every(s=>now.get(s.id)===s.hash),'请求期间触发来源变化，结果未应用');
-            const snapshot=seed.memorySnapshot,memory=await this.memory();assert(this.signature(memory)===this.signature(snapshot)&&(memory?.revisionSignature??null)===(snapshot?.revisionSignature??null),'请求期间 BB-Memory 存档或记忆内容变化，结果未应用');
-            if(job.prefixHash)assert(sourcePrefixes(latest.sources).get(job.source.id)===job.prefixHash,'请求期间来源顺序变化，结果未应用');
+            await this.validateSources(job);
+            const snapshot=seed.memorySnapshot,memory=formatOnly?null:await this.memory();if(!formatOnly)assert(this.signature(memory)===this.signature(snapshot)&&(memory?.revisionSignature??null)===(snapshot?.revisionSignature??null),'请求期间 BB-Memory 存档或记忆内容变化，结果未应用');
+            if(job.kind==='worldTask'){
+                const inspection=inspectWorldTaskResult(result,w.data,{mode:input.mode,ids:job.signal.ids,capacity:settings.worldTaskCapacity??5});
+                if(!inspection.valid){await a.edit(ownerId,async d=>{await this.validateSources(job);assert(guard()&&await stateHash(d)===baseHash,'响应返回时资料已变化，不能保存旧修复草稿');const j=d.jobs.find(j=>j.id===job.id);assert(j,'任务已移除');j.repair={baseHash,issues:inspection.issues,draft:inspection.draft,drafts:inspection.drafts,raw:responseText(result).slice(0,200000),checkMemory:!formatOnly,memoryIdentity:this.signature(snapshot)??null,memoryRevision:snapshot?.revisionSignature??null};j.state='failed';j.retryable=false;j.error='返回内容待补全：'+inspection.issues.join('；').slice(0,250);return d;},{guard});a.stats.failed++;a.notify('世界任务返回内容已保留，请到任务页查看缺项并补全','warning');return;}
+            }
             const changes=job.kind==='worldTask'?parseWorldTaskResult(result,w.data,{mode:input.mode,ids:job.signal.ids,capacity:settings.worldTaskCapacity??5}):parseInspirationPlanResult(result,w.data,{capacity:settings.inspirationCapacity??20});
             const cachedResult={baseHash,promptHash,result};a.resultCache.set(cacheKey,cachedResult);await a.writeLocal(cacheKey,cachedResult);
-            await a.edit(ownerId,async d=>{const memory=await this.memory();assert(this.signature(memory)===this.signature(seed.memorySnapshot)&&(memory?.revisionSignature??null)===(seed.memorySnapshot?.revisionSignature??null),'提交期间记忆存档或内容变化');const fresh=await a.host.capture(),fh=new Map(fresh.sources.map(s=>[s.id,s.hash]));assert(fresh.chatKey===job.chatKey&&job.sources.every(s=>fh.get(s.id)===s.hash)&&(!job.prefixHash||sourcePrefixes(fresh.sources).get(job.source.id)===job.prefixHash),'提交期间来源已变化');assert(guard()&&await stateHash(d)===baseHash,'任务期间资料已修改，请重试以合并最新资料');if(job.kind==='inspirationPlan')assert(inspirationRoom(d,a.settings,fresh).canAdd,'新增期间灵感间隔已变化，请稍后重试');let next=applyChanges(d,changes,{origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor});next.jobs=next.jobs.filter(j=>j.id!==job.id);if(job.kind==='inspirationPlan'&&changes.length){const latestAssistant=fresh.rows.findLast(r=>r.role==='assistant'),c=next.controls?.find(c=>c.source.id===latestAssistant?.id&&c.source.hash===latestAssistant?.hash);if(c)c.addedInspirationIds=changes.filter(c=>c.op==='put').map(c=>c.record.id);}return next;},{guard});
+            await a.edit(ownerId,async d=>{assert(d.jobs.some(j=>j.id===job.id),'任务已移除，旧结果不应用');if(!formatOnly){const memory=await this.memory();assert(this.signature(memory)===this.signature(seed.memorySnapshot)&&(memory?.revisionSignature??null)===(seed.memorySnapshot?.revisionSignature??null),'提交期间记忆存档或内容变化');}await this.validateSources(job);const fresh=job.kind==='inspirationPlan'?await a.host.capture():null;assert(guard()&&await stateHash(d)===baseHash,'任务期间资料已修改，请重试以合并最新资料');if(job.kind==='inspirationPlan')assert(inspirationRoom(d,a.settings,fresh).canAdd,'新增期间灵感间隔已变化，请稍后重试');let next=applyChanges(d,changes,{origin:job.kind,sources:job.sources,key:job.key,anchor:job.anchor});next.jobs=next.jobs.filter(j=>j.id!==job.id);if(job.kind==='inspirationPlan'&&changes.length){const latestAssistant=fresh.rows.findLast(r=>r.role==='assistant'),c=next.controls?.find(c=>c.source.id===latestAssistant?.id&&c.source.hash===latestAssistant?.hash);if(c)c.addedInspirationIds=changes.filter(c=>c.op==='put').map(c=>c.record.id);}return next;},{guard});
             a.resultCache.delete(cacheKey);await a.writeLocal(cacheKey,null).catch(()=>{});a.stats.success++;a.stats.usage=result?.usage??null;
         }catch(e){a.stats.failed++;if(epoch===a.epoch&&a.documentFor(ownerId)){await a.edit(ownerId,d=>{const j=d.jobs.find(j=>j.id===job.id);if(j){j.state='failed';j.error=controller.signal.aborted?'用户已停止；可在任务页手动重试':String(e.message).slice(0,300);j.retryable=false;}return d;}).catch(()=>{});a.report(e);}}
         finally{if(a.controller===controller){a.controller=null;a.activeJob=null;}a.requestState='';a.changed();}

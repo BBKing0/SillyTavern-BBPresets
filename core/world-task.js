@@ -1,4 +1,4 @@
-import {assert,applyChanges,copy,validId,validateDocument} from './model.js';
+import {assert,applyChanges,copy,uid,validId,validateDocument} from './model.js';
 import {parseModelJSON,responseText} from './json.js';
 
 const only=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(k=>keys.includes(k));
@@ -52,6 +52,115 @@ export function parseWorldTaskResult(raw,doc,{mode='create',ids=[],capacity=5}={
     const preview=applyChanges(doc,changes,{origin:'worldTask'});
     assert(preview.records.filter(r=>r.status==='active').length<=Math.max(capacity,doc.records.filter(r=>r.status==='active').length),'世界任务数量超过当前存档上限');
     return copy(changes);
+}
+
+const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
+const taskFields=['id','kind','title','summary','blocks','truth','status','importance','nextNode','keywords','links'];
+const permissionFields=['locked','origin','sources','joiner','creator'];
+const draftBody=record=>Array.isArray(record.blocks)?record.blocks.map(block=>typeof block==='string'?block:typeof block?.text==='string'?block.text:'').join('\n\n'):typeof record.blocks==='string'?record.blocks:typeof record.text==='string'?record.text:typeof record.body==='string'?record.body:'';
+
+function taskDraft(record,{op='put',blockedIssues=[]}={}) {
+    return {id:typeof record.id==='string'?record.id:'',title:typeof record.title==='string'?record.title:'',summary:typeof record.summary==='string'?record.summary:'',text:draftBody(record),nextNode:typeof record.nextNode==='string'?record.nextNode:'',status:record.status??'active',record:copy(record),op,blockedIssues:copy(blockedIssues)};
+}
+
+function recordIssues(record,path) {
+    const issues=[],missing=(key,label)=>issues.push(`${path}.${key}：缺少${label}，确认补全时可自动补结构`);
+    for(const key of Object.keys(record))if(permissionFields.includes(key))issues.push(`${path}.${key}：模型不能提供保护、来源或权限字段`);else if(![...taskFields,'text','body'].includes(key))issues.push(`${path}.${key}：不支持的字段`);
+    for(const [key,label,valid] of [['id','任务 ID',validId],['kind','类别',value=>value==='worldTask'],['truth','创作计划标记',value=>value==='plan'],['status','状态',value=>['active','archived'].includes(value)],['importance','重要程度',value=>['minor','major'].includes(value)]]){
+        if(record[key]===undefined)missing(key,label);else if(!valid(record[key]))issues.push(`${path}.${key}：${label}无效`);
+    }
+    for(const [key,label,max] of [['title','任务名',300],['summary','一句话简介',500],['nextNode','下一阶段方向',500]]){
+        const value=record[key],required=key!=='nextNode'||record.status!=='archived';
+        if(value===undefined||typeof value==='string'&&!value.trim()&&required)issues.push(`${path}.${key}：缺少非空${label}`);
+        else if(typeof value!=='string'||value.length>max)issues.push(`${path}.${key}：${label}须为不超过 ${max} 字符的文字`);
+    }
+    if(!Array.isArray(record.blocks)){
+        if(object(record.blocks))for(const key of Object.keys(record.blocks))if(permissionFields.includes(key))issues.push(`${path}.blocks.${key}：模型不能提供保护、来源或权限字段`);
+        if(draftBody(record).trim())issues.push(`${path}.blocks：正文已保留，确认补全时可转换为段落结构`);
+        else issues.push(`${path}.blocks：缺少非空任务主体`);
+    }else{
+        if(!record.blocks.length||record.blocks.length>100)issues.push(`${path}.blocks：段落数须为 1—100`);
+        const ids=new Set();
+        record.blocks.forEach((block,index)=>{
+            const at=`${path}.blocks[${index}]`;
+            if(typeof block==='string'){issues.push(`${at}：文字已保留，确认补全时可转换为段落结构`);return;}
+            if(!object(block)){issues.push(`${at}：须为包含 text 的段落对象`);return;}
+            for(const key of Object.keys(block))if(key==='locked')issues.push(`${at}.${key}：模型不能提供保护、来源或权限字段`);else if(!['id','text'].includes(key))issues.push(`${at}.${key}：不支持的字段`);
+            if(block.id===undefined)issues.push(`${at}.id：缺少段落 ID，确认补全时可自动补结构`);
+            else if(!validId(block.id)||ids.has(block.id))issues.push(`${at}.id：段落 ID 无效或重复`);
+            ids.add(block.id);
+            if(typeof block.text!=='string')issues.push(`${at}.text：缺少文字或文字类型无效`);
+        });
+        if(!draftBody(record).trim())issues.push(`${path}.blocks：缺少非空任务主体`);
+    }
+    const bodyLength=Array.isArray(record.blocks)?record.blocks.reduce((sum,block)=>sum+(typeof block==='string'?block.length:typeof block?.text==='string'?block.text.length:0),0):draftBody(record).length;
+    if(bodyLength>12000)issues.push(`${path}.blocks：任务主体超过 12000 字符`);
+    return issues;
+}
+
+// Inspection never commits, removes permissions, or guesses missing creative text.
+// The original record is kept so a repaired draft still passes the model's full safety checks.
+export function inspectWorldTaskResult(raw,doc,options={}) {
+    let changes,error;
+    try{changes=parseWorldTaskResult(raw,doc,options);}catch(cause){error=cause.message;}
+    let result;
+    try{result=parseModelJSON(raw,'世界任务响应');}catch(cause){
+        const draft=taskDraft({text:responseText(raw)}),issues=[`$：${cause.message}`,...recordIssues(draft.record,'$')];
+        return {valid:false,issues:[...new Set(issues)],draft,drafts:[draft]};
+    }
+    const issues=[],drafts=[];
+    const add=(record,path,op='put',blockedIssues=[])=>{
+        if(!object(record)){issues.push(`${path}：缺少世界任务对象`);return;}
+        drafts.push(taskDraft(record,{op,blockedIssues}));issues.push(...recordIssues(record,path));
+    };
+    if(object(result)&&Object.hasOwn(result,'changes')){
+        const rootIssues=Object.keys(result).filter(key=>key!=='changes').map(key=>`$.${key}：不支持的响应字段`);issues.push(...rootIssues);
+        if(!Array.isArray(result.changes))issues.push('$.changes：须为变更数组');
+        else{
+            if(result.changes.length>50)issues.push('$.changes：一次最多 50 个变更');
+            const batchIssues=result.changes.length!==1?['$.changes：原响应包含多项变更，须修正完整 JSON，不能只保存单条草稿']:[];
+            result.changes.forEach((change,index)=>{
+                const path=`$.changes[${index}]`;
+                if(!object(change)){issues.push(`${path}：须为变更对象`);return;}
+                const blockers=[...rootIssues,...batchIssues];
+                if(!['put','remove'].includes(change.op))blockers.push(`${path}.op：不支持的操作`);
+                const keys=change.op==='remove'?['op','id']:['op','record'];
+                for(const key of Object.keys(change))if(!keys.includes(key))blockers.push(`${path}.${key}：不支持的变更字段`);
+                issues.push(...blockers);
+                if(change.op!=='remove'||change.record!==undefined)add(change.record,`${path}.record`,change.op,blockers);
+            });
+        }
+    }else if(object(result)&&Object.hasOwn(result,'record')){
+        const blockers=Object.keys(result).filter(key=>!['op','record'].includes(key)).map(key=>`$.${key}：不支持的响应字段`);
+        if(result.op!==undefined&&result.op!=='put')blockers.push('$.op：不支持的操作');
+        issues.push('$：缺少 changes 变更数组',...blockers);add(result.record,'$.record',result.op??'put',blockers);
+    }else if(object(result)){issues.push('$：缺少 changes 变更数组');add(result,'$');}
+    else issues.push('$：须返回世界任务对象或 changes 变更数组');
+    if(error)issues.push(`$：${error}`);
+    return {valid:!error,...(!error?{changes}:{}),issues:!error?[]:[...new Set(issues)],draft:drafts[0]??null,drafts};
+}
+
+// Only missing structure receives defaults. Existing invalid values and permission fields survive
+// into parseWorldTaskResult and are rejected there, including protected text and advance scope.
+export function worldTaskDraftResult(draft,doc,options={}) {
+    assert(object(draft),'世界任务补全草稿无效');
+    assert((draft.op??'put')==='put'&&!(draft.blockedIssues??[]).length,'草稿包含不支持的操作或响应字段，请修正原始 JSON');
+    const record=object(draft.record)?copy(draft.record):{};
+    for(const key of ['title','summary','nextNode'])record[key]=draft[key];
+    if(draft.id)record.id=draft.id;
+    assert(typeof draft.text==='string','任务主体须为文字');
+    const originalBody=draftBody(record),originalBlocks=record.blocks;
+    assert(originalBlocks===undefined||typeof originalBlocks==='string'||Array.isArray(originalBlocks),'原 blocks 格式无效，请修正原始 JSON');
+    if(Array.isArray(originalBlocks)&&draft.text===originalBody)record.blocks=originalBlocks.map(block=>typeof block==='string'?{id:uid(),text:block}:object(block)?{...block,...(block.id===undefined?{id:uid()}:{})}:block);
+    else if(Array.isArray(originalBlocks)&&originalBlocks.length===1&&object(originalBlocks[0]))record.blocks=[{...originalBlocks[0],...(originalBlocks[0].id===undefined?{id:uid()}:{}),text:draft.text}];
+    else {
+        // Do not let collapsing a malformed multi-block reply discard forbidden permission fields.
+        assert(!Array.isArray(originalBlocks)||originalBlocks.every(block=>object(block)&&Object.keys(block).every(key=>['id','text'].includes(key))),'原段落含权限或不支持的字段，请修正原始 JSON');
+        record.blocks=[{id:uid(),text:draft.text}];
+    }
+    delete record.text;delete record.body;
+    for(const [key,value] of [['id',uid()],['kind','worldTask'],['truth','plan'],['status','active'],['importance','minor']])if(record[key]===undefined)record[key]=value;
+    return parseWorldTaskResult(JSON.stringify({changes:[{op:'put',record}]}),doc,options);
 }
 
 export function parseInspirationPlanResult(raw,doc,{capacity=20}={}) {
